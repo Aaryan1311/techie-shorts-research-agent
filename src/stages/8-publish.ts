@@ -75,10 +75,9 @@ export async function runPublishStage(): Promise<number> {
         `;
 
         for (const tag of tags) {
-          const newsTagId = generateCuid();
           await prisma.$executeRaw`
-            INSERT INTO news_tags (id, "newsId", "tagId")
-            VALUES (${newsTagId}, ${newsId}, ${tag.id})
+            INSERT INTO news_tags ("newsId", "tagId")
+            VALUES (${newsId}, ${tag.id})
             ON CONFLICT ("newsId", "tagId") DO NOTHING
           `;
         }
