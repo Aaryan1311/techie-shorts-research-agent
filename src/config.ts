@@ -53,6 +53,6 @@ export const RATE_LIMITS = {
   gemini: 5000, // 5 seconds between calls
 };
 
-export const MAX_ARTICLES_PER_RUN = 15;
+export const MAX_ARTICLES_PER_RUN = 25;
 
 export const PIPELINE_CRON = "*/30 * * * *"; // Every 30 minutes

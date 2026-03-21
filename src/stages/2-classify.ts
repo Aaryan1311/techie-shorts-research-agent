@@ -151,7 +151,7 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
   const allArticles = await prisma.pipelineArticle.findMany({
     where: { stage: "FETCHED" },
     orderBy: { createdAt: "asc" },
-    take: MAX_ARTICLES_PER_RUN * 3, // Fetch extra to allow filtering
+    take: 200,
   });
 
   if (allArticles.length === 0) {
@@ -159,9 +159,7 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
     return { passed: 0, rejected: 0 };
   }
 
-  // Source diversity: proportional limits
-  const maxPerSource = allArticles.length <= 15 ? 3 : 5;
-
+  // Source-interleaving: round-robin from each source for natural diversity
   const bySource = new Map<string, typeof allArticles>();
   for (const a of allArticles) {
     const group = bySource.get(a.source) ?? [];
@@ -169,38 +167,29 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
     bySource.set(a.source, group);
   }
 
-  // Log source counts before trimming
-  const beforeCounts: string[] = [];
-  for (const [source, group] of bySource) {
-    beforeCounts.push(`${source}(${group.length})`);
-  }
-  console.log(`[classify] Sources before trim: ${beforeCounts.join(", ")}`);
+  const sourceCounts = Array.from(bySource.entries()).map(([s, g]) => `${s}(${g.length})`);
+  console.log(`[classify] Sources: ${sourceCounts.join(", ")}`);
 
-  const articles: typeof allArticles = [];
-  for (const [source, group] of bySource) {
-    if (group.length <= maxPerSource) {
-      articles.push(...group);
-    } else {
-      // Keep top by description length (longer = more substance)
-      const sorted = group.sort(
-        (a, b) => (b.rawDescription?.length ?? 0) - (a.rawDescription?.length ?? 0)
-      );
-      articles.push(...sorted.slice(0, maxPerSource));
-      const skipped = group.length - maxPerSource;
-      console.log(`[classify] Source diversity: kept ${maxPerSource}/${group.length} from ${source} (skipped ${skipped})`);
+  // Round-robin: pick one from each source in turn
+  const interleaved: typeof allArticles = [];
+  const sourceQueues = Array.from(bySource.values());
+  const indices = new Array(sourceQueues.length).fill(0);
+
+  while (interleaved.length < MAX_ARTICLES_PER_RUN) {
+    let added = false;
+    for (let i = 0; i < sourceQueues.length; i++) {
+      if (indices[i] < sourceQueues[i].length) {
+        interleaved.push(sourceQueues[i][indices[i]]);
+        indices[i]++;
+        added = true;
+        if (interleaved.length >= MAX_ARTICLES_PER_RUN) break;
+      }
     }
+    if (!added) break; // All sources exhausted
   }
 
-  // Log after trimming
-  const afterBySource = new Map<string, number>();
-  for (const a of articles) {
-    afterBySource.set(a.source, (afterBySource.get(a.source) ?? 0) + 1);
-  }
-  const afterCounts = Array.from(afterBySource.entries()).map(([s, c]) => `${s}(${c})`);
-  console.log(`[classify] Sources after trim: ${afterCounts.join(", ")}`);
-
-  // Cap at MAX_ARTICLES_PER_RUN
-  const batch = articles.slice(0, MAX_ARTICLES_PER_RUN);
+  const batch = interleaved;
+  console.log(`[classify] Batch: ${batch.length} articles from ${bySource.size} sources`);
 
   let passed = 0;
   let rejected = 0;
