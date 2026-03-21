@@ -1,7 +1,7 @@
 import RSSParser from "rss-parser";
 import he from "he";
 import prisma from "../db";
-import { RSS_SOURCES, REDDIT_SOURCES, REDDIT_MIN_UPVOTES } from "../config";
+import { RSS_SOURCES, REDDIT_SOURCES } from "../config";
 
 const parser = new RSSParser({
   customFields: {
@@ -94,7 +94,7 @@ async function fetchRedditFeeds(): Promise<FeedItem[]> {
         // Skip self-posts, NSFW, and low-upvote posts
         if (d.is_self) continue;
         if (d.over_18) continue;
-        if (d.ups < REDDIT_MIN_UPVOTES) continue;
+        if (d.ups < source.minUpvotes) continue;
         if (!d.url) continue;
 
         // Skip reddit-internal links

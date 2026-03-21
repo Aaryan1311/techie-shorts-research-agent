@@ -28,7 +28,7 @@ Return ONLY valid JSON with these fields:
   "tags": ["tag-slug-1", "tag-slug-2"]
 }`;
 
-const TYPE_PROMPTS: Record<ArticleType, string> = {
+const TYPE_PROMPTS: Record<string, string> = {
   PRODUCT_LAUNCH: `This is a product/tool launch. The detailed article should cover: what is it, what problem does it solve, who made it, how is it different from alternatives, pricing/availability. "whatsNext.buildIdeas" should be an array of 3 objects: [{"name": "Project Name", "difficulty": "Easy/Medium/Hard", "description": "2-3 sentences"}] sorted by difficulty.`,
 
   BUSINESS: `This is business news. The detailed article should cover: which company, what happened, how much money (if funding), who's affected (if layoff), why it matters for the industry. "whatsNext.buildIdeas" should be null — business news doesn't have build ideas.`,
@@ -38,6 +38,18 @@ const TYPE_PROMPTS: Record<ArticleType, string> = {
   STATEMENT: `This is about a tech leader's statement or opinion. The detailed article should cover: who said it, exact quote or paraphrase, context, why it matters, any responses from others. "whatsNext.buildIdeas" should be null.`,
 
   DEEP_TECH: `This is a technical deep-dive (research paper, engineering blog). The detailed article should explain the concept in simple terms — imagine explaining to a smart 15-year-old. Use analogies. "whatsNext.buildIdeas" should be an array of 2-3 experiment ideas.`,
+
+  COMPETITIVE_PROGRAMMING: `This is competitive programming news. The detailed article should cover: which contest/platform, results or changes, notable participants, impact on the CP community. "whatsNext.buildIdeas" should include practice resources or tools competitive programmers can build.`,
+
+  GAMING_GADGETS: `This is gaming/gadget news. The detailed article should cover: what was announced/launched, specs that matter, pricing, availability, how it compares to competitors. "whatsNext.buildIdeas" should be null unless there's a clear developer angle (e.g., new SDK, modding tools).`,
+
+  DESIGN: `This is design/UX news. The detailed article should cover: what tool/update/finding, how it changes the design workflow, who benefits most, what's different from before. "whatsNext.buildIdeas" should include design tool plugins or resources designers can create.`,
+
+  RESEARCH: `This is a research paper or technical finding. The detailed article should explain the concept in the SIMPLEST possible terms — imagine explaining to a smart 15-year-old. Use analogies from everyday life. Cover: what was discovered, why it matters, who did the research, what could this lead to. "whatsNext.buildIdeas" should include experiment ideas researchers or developers can try.`,
+
+  COOL_TECH: `This is cool/futuristic tech news. The detailed article should capture the WOW factor — what happened, why it's impressive, how close we are to this being normal. Make the reader excited about the future. "whatsNext.buildIdeas" can include fun project ideas inspired by this tech.`,
+
+  CAREER_CULTURE: `This is career/culture news. The detailed article should cover: what changed, which companies/regions are affected, data and numbers if available, what tech professionals should consider. "whatsNext.buildIdeas" should be null. Instead "whatsNext.personalImpact" should be extra detailed with actionable career advice.`,
 };
 
 interface BuildIdea {
@@ -95,8 +107,8 @@ export async function runGenerateStage(): Promise<number> {
   console.log("[Stage 6] Generating content...");
 
   const articles = await prisma.pipelineArticle.findMany({
-    where: { stage: "CLASSIFIED" },
-    orderBy: { classifiedAt: "asc" },
+    where: { stage: "DEDUPED" },
+    orderBy: { deduplicatedAt: "asc" },
     take: MAX_ARTICLES_PER_RUN,
   });
 
@@ -110,7 +122,7 @@ export async function runGenerateStage(): Promise<number> {
   for (const article of articles) {
     try {
       const articleType = article.articleType ?? "DEEP_TECH";
-      const typePrompt = TYPE_PROMPTS[articleType as ArticleType] ?? TYPE_PROMPTS.DEEP_TECH;
+      const typePrompt = TYPE_PROMPTS[articleType] ?? TYPE_PROMPTS.DEEP_TECH;
 
       const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\n${typePrompt}`;
 

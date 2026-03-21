@@ -29,6 +29,12 @@ enum ArticleType {
   SECURITY
   STATEMENT
   DEEP_TECH
+  COMPETITIVE_PROGRAMMING
+  GAMING_GADGETS
+  DESIGN
+  RESEARCH
+  COOL_TECH
+  CAREER_CULTURE
 }
 
 // ─── Pipeline Articles (Agent's internal tracking table) ─────────
