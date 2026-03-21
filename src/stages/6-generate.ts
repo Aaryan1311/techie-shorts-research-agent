@@ -107,8 +107,8 @@ export async function runGenerateStage(): Promise<number> {
   console.log("[Stage 6] Generating content...");
 
   const articles = await prisma.pipelineArticle.findMany({
-    where: { stage: "DEDUPED" },
-    orderBy: { deduplicatedAt: "asc" },
+    where: { stage: "VERIFIED" },
+    orderBy: { verifiedAt: "asc" },
     take: MAX_ARTICLES_PER_RUN,
   });
 
@@ -126,7 +126,13 @@ export async function runGenerateStage(): Promise<number> {
 
       const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\n${typePrompt}`;
 
-      const userPrompt = `Title: ${article.rawTitle}\nDescription: ${article.rawDescription ?? "N/A"}\nSource: ${article.source}\nArticle Type: ${articleType}`;
+      // Build user prompt with full article text when available
+      let userPrompt = `Source article title: ${article.rawTitle}\nSource: ${article.source}\nSource description: ${article.rawDescription ?? "N/A"}\nArticle Type: ${articleType}`;
+
+      if (article.fullArticleText && article.sourceReadSuccess) {
+        const truncatedText = article.fullArticleText.split(/\s+/).slice(0, 1500).join(" ");
+        userPrompt += `\n\nFull source article (use this as the primary source of facts):\n${truncatedText}\n\nIMPORTANT: Base your detailed article on the FACTS in the source article above. Do NOT make up facts, quotes, numbers, or details that aren't in the source. If the source doesn't provide enough detail, say so honestly rather than fabricating.`;
+      }
 
       const result = await callModel("generate", systemPrompt, userPrompt);
 

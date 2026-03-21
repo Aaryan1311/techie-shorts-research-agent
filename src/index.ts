@@ -5,27 +5,42 @@ import { PIPELINE_CRON } from "./config";
 import { runSetupStage } from "./stages/0-setup";
 import { runFetchStage, FetchResult } from "./stages/1-fetch";
 import { runClassifyStage } from "./stages/2-classify";
+import { runReadSourceStage } from "./stages/3-read-source";
 import { runDeduplicateStage } from "./stages/4-deduplicate";
+import { runVerifyStage } from "./stages/5-verify";
 import { runGenerateStage } from "./stages/6-generate";
+import { runQAReviewStage } from "./stages/7-qa-review";
 import { runPublishStage } from "./stages/8-publish";
 
-async function unstickClassifiedArticles(): Promise<void> {
-  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
-  const result = await prisma.pipelineArticle.updateMany({
-    where: {
-      stage: "CLASSIFIED",
-      classifiedAt: { lt: thirtyMinAgo },
-    },
-    data: {
-      stage: "DEDUPED",
-      isDuplicate: false,
-      deduplicationReason: "Auto-promoted: stuck at CLASSIFIED for 30+ minutes",
-      deduplicatedAt: new Date(),
-    },
-  });
+const STUCK_PROMOTIONS: { from: string; to: string; field: string }[] = [
+  { from: "CLASSIFIED", to: "SOURCE_READ", field: "classifiedAt" },
+  { from: "SOURCE_READ", to: "DEDUPED", field: "sourceReadAt" },
+  { from: "DEDUPED", to: "VERIFIED", field: "deduplicatedAt" },
+  { from: "VERIFIED", to: "CONTENT_GENERATED", field: "verifiedAt" },
+  { from: "CONTENT_GENERATED", to: "QA_PASSED", field: "generatedAt" },
+];
 
-  if (result.count > 0) {
-    console.log(`[Pipeline] Auto-promoted ${result.count} stuck CLASSIFIED articles to DEDUPED`);
+async function unstickArticles(): Promise<void> {
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
+
+  for (const promo of STUCK_PROMOTIONS) {
+    try {
+      const result = await prisma.pipelineArticle.updateMany({
+        where: {
+          stage: promo.from as any,
+          [promo.field]: { lt: thirtyMinAgo },
+        },
+        data: {
+          stage: promo.to as any,
+        },
+      });
+
+      if (result.count > 0) {
+        console.log(`[Pipeline] Auto-promoted ${result.count} stuck ${promo.from} → ${promo.to}`);
+      }
+    } catch (err: any) {
+      // Non-critical — some stages might not have the date field set
+    }
   }
 }
 
@@ -36,12 +51,15 @@ async function runPipeline(): Promise<void> {
 
   let fetchResult: FetchResult = { newCount: 0, sourceCounts: {} };
   let classified = { passed: 0, rejected: 0 };
+  let sourceRead = { success: 0, failed: 0 };
   let deduped = { unique: 0, duplicates: 0, updates: 0 };
+  let verified = { passed: 0, failed: 0 };
   let generated = 0;
+  let qaResult = { published: 0, revised: 0, rejected: 0 };
   let published = 0;
   let errors = 0;
 
-  // Stage 0: Setup (tags, enum values)
+  // Stage 0: Setup
   try {
     await runSetupStage();
   } catch (err: any) {
@@ -49,9 +67,9 @@ async function runPipeline(): Promise<void> {
     errors++;
   }
 
-  // Unstick legacy CLASSIFIED articles
+  // Unstick articles at any stage
   try {
-    await unstickClassifiedArticles();
+    await unstickArticles();
   } catch (err: any) {
     console.error("[Pipeline] Unstick failed:", err.message);
     errors++;
@@ -73,6 +91,14 @@ async function runPipeline(): Promise<void> {
     errors++;
   }
 
+  // Stage 3: Read Source
+  try {
+    sourceRead = await runReadSourceStage();
+  } catch (err: any) {
+    console.error("[Pipeline] Stage 3 (Read Source) failed:", err.message);
+    errors++;
+  }
+
   // Stage 4: Deduplicate
   try {
     deduped = await runDeduplicateStage();
@@ -81,11 +107,27 @@ async function runPipeline(): Promise<void> {
     errors++;
   }
 
+  // Stage 5: Verify
+  try {
+    verified = await runVerifyStage();
+  } catch (err: any) {
+    console.error("[Pipeline] Stage 5 (Verify) failed:", err.message);
+    errors++;
+  }
+
   // Stage 6: Generate
   try {
     generated = await runGenerateStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 6 (Generate) failed:", err.message);
+    errors++;
+  }
+
+  // Stage 7: QA Review
+  try {
+    qaResult = await runQAReviewStage();
+  } catch (err: any) {
+    console.error("[Pipeline] Stage 7 (QA Review) failed:", err.message);
     errors++;
   }
 
@@ -125,8 +167,11 @@ async function runPipeline(): Promise<void> {
   }
 
   console.log(`   Classified: ${classified.passed} passed, ${classified.rejected} rejected`);
+  console.log(`   Source Read: ${sourceRead.success} ok, ${sourceRead.failed} failed`);
   console.log(`   Deduped: ${deduped.unique} unique, ${deduped.duplicates} duplicates`);
+  console.log(`   Verified: ${verified.passed} passed, ${verified.failed} rejected`);
   console.log(`   Generated: ${generated} articles`);
+  console.log(`   QA Review: ${qaResult.published} passed, ${qaResult.revised} revised, ${qaResult.rejected} rejected`);
   console.log(`   Published: ${published} articles`);
   console.log(`   Failed: ${failed}`);
   console.log(`   Errors: ${errors}`);

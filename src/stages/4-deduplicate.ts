@@ -54,8 +54,8 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
   console.log("[Stage 4] Deduplicating articles...");
 
   const articles = await prisma.pipelineArticle.findMany({
-    where: { stage: "CLASSIFIED" },
-    orderBy: { createdAt: "asc" },
+    where: { stage: "SOURCE_READ" },
+    orderBy: { sourceReadAt: "asc" },
     take: MAX_ARTICLES_PER_RUN,
   });
 
@@ -91,9 +91,9 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
     ];
   } catch (poolErr: any) {
     console.warn(`[dedup] Failed to fetch comparison pool: ${poolErr.message}`);
-    console.warn("[dedup] Auto-promoting all CLASSIFIED articles to DEDUPED");
+    console.warn("[dedup] Auto-promoting all SOURCE_READ articles to DEDUPED");
     await prisma.pipelineArticle.updateMany({
-      where: { stage: "CLASSIFIED" },
+      where: { stage: "SOURCE_READ" },
       data: {
         stage: "DEDUPED",
         isDuplicate: false,

@@ -22,6 +22,12 @@ const NEW_ARTICLE_TYPES = [
   "CAREER_CULTURE",
 ];
 
+const PIPELINE_STAGE_VALUES = [
+  "SOURCE_READ",
+  "VERIFIED",
+  "QA_PASSED",
+];
+
 export async function runSetupStage(): Promise<void> {
   console.log("[Stage 0] Running setup...");
 
@@ -52,6 +58,19 @@ export async function runSetupStage(): Promise<void> {
       } else {
         console.error(`[setup] FAILED to add enum value '${value}': ${err.message}`);
         console.error(`[setup] Full error:`, err);
+      }
+    }
+  }
+
+  // Ensure PipelineStage enum values exist
+  for (const value of PIPELINE_STAGE_VALUES) {
+    try {
+      await prisma.$executeRawUnsafe(
+        `ALTER TYPE "PipelineStage" ADD VALUE IF NOT EXISTS '${value}'`
+      );
+    } catch (err: any) {
+      if (!err.message?.includes("already exists")) {
+        console.warn(`[setup] PipelineStage enum add failed for ${value}: ${err.message}`);
       }
     }
   }

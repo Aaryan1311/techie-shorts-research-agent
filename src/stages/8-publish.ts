@@ -10,8 +10,8 @@ export async function runPublishStage(): Promise<number> {
   console.log("[Stage 8] Publishing articles...");
 
   const articles = await prisma.pipelineArticle.findMany({
-    where: { stage: "CONTENT_GENERATED" },
-    orderBy: { generatedAt: "asc" },
+    where: { stage: "QA_PASSED" },
+    orderBy: { qaPassedAt: "asc" },
   });
 
   if (articles.length === 0) {

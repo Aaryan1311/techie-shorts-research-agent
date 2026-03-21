@@ -56,3 +56,26 @@ export const RATE_LIMITS = {
 export const MAX_ARTICLES_PER_RUN = 25;
 
 export const PIPELINE_CRON = "*/30 * * * *"; // Every 30 minutes
+
+export const SOURCE_TRUST: Record<string, number> = {
+  // High trust (8-10): established publications with editorial standards
+  "techcrunch": 9,
+  "theverge": 9,
+  "arstechnica": 9,
+  "github": 10,
+  "google-ai": 10,
+  "techmeme": 8,
+  "inc42": 8,
+  "yourstory": 7,
+
+  // Medium trust (5-7): community-curated or aggregated
+  "hackernews": 7,
+  "lobsters": 7,
+  "producthunt": 6,
+  "smashingmagazine": 8,
+  "css-tricks": 8,
+  "androidauthority": 7,
+
+  // Lower trust (3-5): user-submitted, less editorial oversight
+  "reddit": 5,
+};
