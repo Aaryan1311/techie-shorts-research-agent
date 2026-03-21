@@ -15,6 +15,7 @@
     "@extractus/article-extractor": "^8.0.0",
     "@google/generative-ai": "^0.21.0",
     "@prisma/client": "^6.2.0",
+    "dotenv": "^17.3.1",
     "groq-sdk": "^0.8.0",
     "he": "^1.2.0",
     "node-cron": "^3.0.3",

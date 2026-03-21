@@ -1,3 +1,4 @@
+import "dotenv/config";
 import cron from "node-cron";
 import prisma from "./db";
 import { PIPELINE_CRON } from "./config";
