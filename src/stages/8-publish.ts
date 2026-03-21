@@ -1,4 +1,10 @@
+import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import prisma from "../db";
+
+function generateCuid(): string {
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 25);
+}
 
 export async function runPublishStage(): Promise<number> {
   console.log("[Stage 8] Publishing articles...");
@@ -18,18 +24,17 @@ export async function runPublishStage(): Promise<number> {
   for (const article of articles) {
     try {
       // Check if already published to news table
-      const existing = await prisma.news.findUnique({
-        where: { sourceUrl: article.sourceUrl },
-        select: { id: true },
-      });
+      const existing = await prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM news WHERE source_url = ${article.sourceUrl} LIMIT 1
+      `;
 
-      if (existing) {
+      if (existing.length > 0) {
         console.log(`[publish] Already in news table, skipping: ${article.sourceUrl}`);
         await prisma.pipelineArticle.update({
           where: { id: article.id },
           data: {
             stage: "PUBLISHED",
-            publishedNewsId: existing.id,
+            publishedNewsId: existing[0].id,
             publishedAt: new Date(),
           },
         });
@@ -37,26 +42,26 @@ export async function runPublishStage(): Promise<number> {
         continue;
       }
 
-      // Create the news row
-      const newsRow = await prisma.news.create({
-        data: {
-          title: article.generatedHeadline ?? article.rawTitle,
-          summary: article.generatedSummary ?? "",
-          detailContent: article.generatedDetail ?? null,
-          futureImpact: article.generatedWhatsNext ?? null,
-          buildOnThis: article.generatedBuildOnThis ?? null,
-          sourceUrl: article.sourceUrl,
-          imageUrl: article.imageUrl ?? null,
-          source: article.source,
-          isActive: true,
-          trendingScore: article.trendingScore ?? null,
-          qualityScore: article.qualityScore ?? null,
-          relevanceScore: article.relevanceScore ?? null,
-          publishedAt: new Date(),
-        },
-      });
+      // Create the news row via raw SQL
+      const newsId = generateCuid();
+      const title = article.generatedHeadline ?? article.rawTitle;
+      const summary = article.generatedSummary ?? "";
+      const detailContent = article.generatedDetail ?? null;
+      const futureImpact = article.generatedWhatsNext ?? null;
+      const buildOnThis = article.generatedBuildOnThis ?? null;
+      const sourceUrl = article.sourceUrl;
+      const imageUrl = article.imageUrl ?? null;
+      const source = article.source;
+      const trendingScore = article.trendingScore ?? null;
+      const qualityScore = article.qualityScore ?? null;
+      const relevanceScore = article.relevanceScore ?? null;
 
-      // Associate tags
+      await prisma.$executeRaw`
+        INSERT INTO news (id, title, summary, detail_content, future_impact, build_on_this, source_url, image_url, source, is_active, trending_score, quality_score, relevance_score, published_at, created_at, updated_at)
+        VALUES (${newsId}, ${title}, ${summary}, ${detailContent}, ${futureImpact}, ${buildOnThis}, ${sourceUrl}, ${imageUrl}, ${source}, true, ${trendingScore}::int, ${qualityScore}::int, ${relevanceScore}::int, NOW(), NOW(), NOW())
+      `;
+
+      // Associate tags via raw SQL
       let tagSlugs: string[] = [];
       try {
         tagSlugs = JSON.parse(article.suggestedTags ?? "[]");
@@ -65,18 +70,17 @@ export async function runPublishStage(): Promise<number> {
       }
 
       if (tagSlugs.length > 0) {
-        const tags = await prisma.tag.findMany({
-          where: { slug: { in: tagSlugs } },
-        });
+        const tags = await prisma.$queryRaw<{ id: string; slug: string }[]>`
+          SELECT id, slug FROM tags WHERE slug = ANY(${tagSlugs}::text[])
+        `;
 
-        if (tags.length > 0) {
-          await prisma.newsTag.createMany({
-            data: tags.map((tag) => ({
-              newsId: newsRow.id,
-              tagId: tag.id,
-            })),
-            skipDuplicates: true,
-          });
+        for (const tag of tags) {
+          const newsTagId = generateCuid();
+          await prisma.$executeRaw`
+            INSERT INTO news_tags (id, news_id, tag_id)
+            VALUES (${newsTagId}, ${newsId}, ${tag.id})
+            ON CONFLICT (news_id, tag_id) DO NOTHING
+          `;
         }
       }
 
@@ -85,16 +89,16 @@ export async function runPublishStage(): Promise<number> {
         where: { id: article.id },
         data: {
           stage: "PUBLISHED",
-          publishedNewsId: newsRow.id,
+          publishedNewsId: newsId,
           publishedAt: new Date(),
         },
       });
 
       published++;
-      console.log(`[publish] Published: ${newsRow.title}`);
+      console.log(`[publish] Published: ${title}`);
     } catch (err: any) {
       // Unique constraint on source_url — already published
-      if (err.code === "P2002") {
+      if (err.code === "P2002" || err.message?.includes("unique constraint")) {
         await prisma.pipelineArticle.update({
           where: { id: article.id },
           data: { stage: "PUBLISHED", publishedAt: new Date() },
