@@ -24,20 +24,20 @@ export const REDDIT_MIN_UPVOTES = 500;
 export const MODEL_CONFIG = {
   classify: {
     primary: { model: "llama-3.1-8b-instant", provider: "groq" as const },
-    fallback: { model: "gemini-2.0-flash", provider: "gemini" as const },
+    fallback: { model: "llama-3.1-8b-instant", provider: "groq" as const },
   },
   generate: {
-    primary: { model: "llama-3.1-70b-versatile", provider: "groq" as const },
-    fallback: { model: "gemini-2.0-flash", provider: "gemini" as const },
+    primary: { model: "llama-3.3-70b-versatile", provider: "groq" as const },
+    fallback: { model: "llama-3.1-8b-instant", provider: "groq" as const },
   },
   qa: {
-    primary: { model: "gemini-2.0-flash", provider: "gemini" as const },
+    primary: { model: "llama-3.1-8b-instant", provider: "groq" as const },
     fallback: { model: "llama-3.1-8b-instant", provider: "groq" as const },
   },
 };
 
 export const RATE_LIMITS = {
-  groq: 3000,   // 3 seconds between calls
+  groq: 5000,   // 5 seconds between calls (avoid rate limits on generate)
   gemini: 5000, // 5 seconds between calls
 };
 
