@@ -7,7 +7,6 @@ import { MAX_ARTICLES_PER_RUN } from "../config";
 const BASE_SYSTEM_PROMPT = `You are a tech journalist writing for Techie Shorts, a news app for tech professionals.
 
 WRITING RULES:
-- Summary must be EXACTLY 60-80 words
 - Language must be so simple that someone without ANY tech background can understand
 - No jargon without explanation. "API" → "a way for apps to talk to each other". "Kubernetes" → "a system that manages cloud servers"
 - Headline must be catchy and hook-driven. Not "Company X releases Product Y" but "Company X just solved a problem every developer has been complaining about"
@@ -18,7 +17,7 @@ WRITING RULES:
 Return ONLY valid JSON with these fields:
 {
   "headline": "catchy hook-driven headline",
-  "summary": "60-80 word summary in simple language",
+  "summary": "Write a summary that is EXACTLY between 60 and 80 words. Count carefully. This is NOT a headline — it's a full paragraph that tells the complete story in miniature. It should answer: What happened? Who is involved? Why does it matter? A 20-word summary is TOO SHORT and will be rejected. A 100-word summary is TOO LONG. Aim for exactly 70 words.",
   "detailContent": "300-400 word detailed article",
   "whatsNext": {
     "industryImpact": "150-200 words on how this changes the tech world",
@@ -177,6 +176,26 @@ export async function runGenerateStage(): Promise<number> {
         }
       }
 
+      // Enforce minimum summary length — expand if too short
+      let finalSummary = ensureString(parsed.summary) ?? "";
+      const summaryWordCount = finalSummary.split(/\s+/).length;
+      if (summaryWordCount < 50 && finalSummary.length > 0) {
+        console.warn(`[generate] Summary too short (${summaryWordCount} words), expanding: ${article.rawTitle}`);
+        try {
+          const expandPrompt = `The following summary is too short at ${summaryWordCount} words. Expand it to EXACTLY 70 words while keeping the same meaning. Add more context, details, and specifics. Do NOT change the tone or key facts.\n\nCurrent summary: ${finalSummary}\n\nReturn ONLY the expanded summary text, nothing else.`;
+          const expandResult = await callModel("generate", "You are a tech news editor. Return only the expanded summary text.", expandPrompt);
+          if (expandResult?.response) {
+            const expanded = expandResult.response.replace(/```/g, "").trim();
+            if (expanded.split(/\s+/).length >= 50) {
+              finalSummary = expanded;
+              console.log(`[generate] Summary expanded to ${expanded.split(/\s+/).length} words`);
+            }
+          }
+        } catch {
+          // Keep original if expansion fails
+        }
+      }
+
       const futureImpact = parsed.whatsNext
         ? formatFutureImpact(parsed.whatsNext)
         : null;
@@ -190,7 +209,7 @@ export async function runGenerateStage(): Promise<number> {
         data: {
           stage: "CONTENT_GENERATED",
           generatedHeadline: ensureString(parsed.headline),
-          generatedSummary: ensureString(parsed.summary),
+          generatedSummary: finalSummary,
           generatedDetail: ensureString(parsed.detailContent),
           generatedWhatsNext: futureImpact,
           generatedBuildOnThis: buildOnThis,
