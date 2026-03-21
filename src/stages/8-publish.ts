@@ -25,7 +25,7 @@ export async function runPublishStage(): Promise<number> {
     try {
       // Check if already published to news table
       const existing = await prisma.$queryRaw<{ id: string }[]>`
-        SELECT id FROM news WHERE source_url = ${article.sourceUrl} LIMIT 1
+        SELECT id FROM news WHERE "sourceUrl" = ${article.sourceUrl} LIMIT 1
       `;
 
       if (existing.length > 0) {
@@ -57,7 +57,7 @@ export async function runPublishStage(): Promise<number> {
       const relevanceScore = article.relevanceScore ?? null;
 
       await prisma.$executeRaw`
-        INSERT INTO news (id, title, summary, detail_content, future_impact, build_on_this, source_url, image_url, source, is_active, trending_score, quality_score, relevance_score, published_at, created_at, updated_at)
+        INSERT INTO news (id, title, summary, "detailContent", "futureImpact", "buildOnThis", "sourceUrl", "imageUrl", source, "isActive", "trendingScore", "qualityScore", "relevanceScore", "publishedAt", "createdAt", "updatedAt")
         VALUES (${newsId}, ${title}, ${summary}, ${detailContent}, ${futureImpact}, ${buildOnThis}, ${sourceUrl}, ${imageUrl}, ${source}, true, ${trendingScore}::int, ${qualityScore}::int, ${relevanceScore}::int, NOW(), NOW(), NOW())
       `;
 
@@ -77,9 +77,9 @@ export async function runPublishStage(): Promise<number> {
         for (const tag of tags) {
           const newsTagId = generateCuid();
           await prisma.$executeRaw`
-            INSERT INTO news_tags (id, news_id, tag_id)
+            INSERT INTO news_tags (id, "newsId", "tagId")
             VALUES (${newsTagId}, ${newsId}, ${tag.id})
-            ON CONFLICT (news_id, tag_id) DO NOTHING
+            ON CONFLICT ("newsId", "tagId") DO NOTHING
           `;
         }
       }
