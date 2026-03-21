@@ -3,15 +3,13 @@ import cron from "node-cron";
 import prisma from "./db";
 import { PIPELINE_CRON } from "./config";
 import { runSetupStage } from "./stages/0-setup";
-import { runFetchStage } from "./stages/1-fetch";
+import { runFetchStage, FetchResult } from "./stages/1-fetch";
 import { runClassifyStage } from "./stages/2-classify";
 import { runDeduplicateStage } from "./stages/4-deduplicate";
 import { runGenerateStage } from "./stages/6-generate";
 import { runPublishStage } from "./stages/8-publish";
 
 async function unstickClassifiedArticles(): Promise<void> {
-  // Move articles stuck at CLASSIFIED for 30+ minutes to DEDUPED
-  // (legacy articles from before dedup stage was added)
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
   const result = await prisma.pipelineArticle.updateMany({
     where: {
@@ -36,17 +34,19 @@ async function runPipeline(): Promise<void> {
   console.log(`\n🚀 Pipeline run starting at ${start.toISOString()}`);
   console.log("═".repeat(60));
 
-  let fetched = 0;
+  let fetchResult: FetchResult = { newCount: 0, sourceCounts: {} };
   let classified = { passed: 0, rejected: 0 };
   let deduped = { unique: 0, duplicates: 0, updates: 0 };
   let generated = 0;
   let published = 0;
+  let errors = 0;
 
   // Stage 0: Setup (tags, enum values)
   try {
     await runSetupStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 0 (Setup) failed:", err.message);
+    errors++;
   }
 
   // Unstick legacy CLASSIFIED articles
@@ -54,13 +54,15 @@ async function runPipeline(): Promise<void> {
     await unstickClassifiedArticles();
   } catch (err: any) {
     console.error("[Pipeline] Unstick failed:", err.message);
+    errors++;
   }
 
   // Stage 1: Fetch
   try {
-    fetched = await runFetchStage();
+    fetchResult = await runFetchStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 1 (Fetch) failed:", err.message);
+    errors++;
   }
 
   // Stage 2: Classify
@@ -68,6 +70,7 @@ async function runPipeline(): Promise<void> {
     classified = await runClassifyStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 2 (Classify) failed:", err.message);
+    errors++;
   }
 
   // Stage 4: Deduplicate
@@ -75,6 +78,7 @@ async function runPipeline(): Promise<void> {
     deduped = await runDeduplicateStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 4 (Deduplicate) failed:", err.message);
+    errors++;
   }
 
   // Stage 6: Generate
@@ -82,6 +86,7 @@ async function runPipeline(): Promise<void> {
     generated = await runGenerateStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 6 (Generate) failed:", err.message);
+    errors++;
   }
 
   // Stage 8: Publish
@@ -89,16 +94,42 @@ async function runPipeline(): Promise<void> {
     published = await runPublishStage();
   } catch (err: any) {
     console.error("[Pipeline] Stage 8 (Publish) failed:", err.message);
+    errors++;
   }
 
+  // Count failed articles
+  let failed = 0;
+  try {
+    failed = await prisma.pipelineArticle.count({
+      where: {
+        stage: "FAILED",
+        failedAt: { gte: start },
+      },
+    });
+  } catch {
+    // Non-critical
+  }
+
+  // Detailed summary
   const elapsed = ((Date.now() - start.getTime()) / 1000).toFixed(1);
   console.log("═".repeat(60));
-  console.log(
-    `✅ Pipeline complete in ${elapsed}s: ` +
-      `${fetched} fetched, ${classified.passed} classified (${classified.rejected} rejected), ` +
-      `${deduped.unique} unique (${deduped.duplicates} dupes), ` +
-      `${generated} generated, ${published} published`
-  );
+  console.log(`✅ Pipeline complete in ${elapsed}s`);
+  console.log(`   Fetched: ${fetchResult.newCount} new items`);
+
+  if (Object.keys(fetchResult.sourceCounts).length > 0) {
+    const sourceStr = Object.entries(fetchResult.sourceCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([s, c]) => `${s}(${c})`)
+      .join(", ");
+    console.log(`   Sources: ${sourceStr}`);
+  }
+
+  console.log(`   Classified: ${classified.passed} passed, ${classified.rejected} rejected`);
+  console.log(`   Deduped: ${deduped.unique} unique, ${deduped.duplicates} duplicates`);
+  console.log(`   Generated: ${generated} articles`);
+  console.log(`   Published: ${published} articles`);
+  console.log(`   Failed: ${failed}`);
+  console.log(`   Errors: ${errors}`);
 }
 
 async function main(): Promise<void> {

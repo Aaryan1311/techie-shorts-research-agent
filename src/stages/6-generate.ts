@@ -144,20 +144,31 @@ export async function runGenerateStage(): Promise<number> {
         continue;
       }
 
-      const parsed = parseJSON<GenerateResult>(result.response);
+      let parsed = parseJSON<GenerateResult>(result.response);
 
       if (!parsed || !parsed.headline || !parsed.summary) {
-        console.warn(`[generate] Invalid response for: ${article.rawTitle}`);
-        await prisma.pipelineArticle.update({
-          where: { id: article.id },
-          data: {
-            stage: "FAILED",
-            failedAt: new Date(),
-            failureReason: "Failed to parse generation JSON or missing required fields",
-            retryCount: { increment: 1 },
-          },
-        });
-        continue;
+        // Retry with simplified prompt
+        console.warn(`[generate] Unparseable response, retrying with simplified prompt: ${article.rawTitle}`);
+        const simplePrompt = `Write a news headline and 60-80 word summary for this article. Return ONLY valid JSON:\n{"headline": "...", "summary": "...", "detailContent": null, "whatsNext": null, "tags": []}\n\nTitle: ${article.rawTitle}\nDescription: ${article.rawDescription ?? "N/A"}`;
+        const retryResult = await callModel("generate", "You are a tech news writer. Return only valid JSON.", simplePrompt);
+
+        if (retryResult) {
+          parsed = parseJSON<GenerateResult>(retryResult.response);
+        }
+
+        if (!parsed || !parsed.headline || !parsed.summary) {
+          console.warn(`[generate] Retry also failed for: ${article.rawTitle}`);
+          await prisma.pipelineArticle.update({
+            where: { id: article.id },
+            data: {
+              stage: "FAILED",
+              failedAt: new Date(),
+              failureReason: "Failed to parse generation JSON after retry",
+              retryCount: { increment: 1 },
+            },
+          });
+          continue;
+        }
       }
 
       const futureImpact = parsed.whatsNext

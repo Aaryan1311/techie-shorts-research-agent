@@ -123,11 +123,16 @@ TAG RULES:
 
 CRITICAL: Quality over quantity. Reject anything below 7. But don't reject an entire CATEGORY — reject bad articles within any category.`;
 
-const VALID_ARTICLE_TYPES = [
+// Whitelist of enum values Prisma client accepts
+const SAFE_ARTICLE_TYPES = new Set([
   "PRODUCT_LAUNCH", "BUSINESS", "SECURITY", "STATEMENT", "DEEP_TECH",
   "COMPETITIVE_PROGRAMMING", "GAMING_GADGETS", "DESIGN", "RESEARCH",
   "COOL_TECH", "CAREER_CULTURE",
-];
+]);
+
+function safeArticleType(raw: string): string {
+  return SAFE_ARTICLE_TYPES.has(raw) ? raw : "DEEP_TECH";
+}
 
 interface ClassifyResult {
   isNews: boolean;
@@ -146,7 +151,7 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
   const allArticles = await prisma.pipelineArticle.findMany({
     where: { stage: "FETCHED" },
     orderBy: { createdAt: "asc" },
-    take: MAX_ARTICLES_PER_RUN * 2, // Fetch extra to allow filtering
+    take: MAX_ARTICLES_PER_RUN * 3, // Fetch extra to allow filtering
   });
 
   if (allArticles.length === 0) {
@@ -154,7 +159,9 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
     return { passed: 0, rejected: 0 };
   }
 
-  // Source diversity: max 3 articles per source, prefer longer titles (more substance)
+  // Source diversity: proportional limits
+  const maxPerSource = allArticles.length <= 15 ? 3 : 5;
+
   const bySource = new Map<string, typeof allArticles>();
   for (const a of allArticles) {
     const group = bySource.get(a.source) ?? [];
@@ -162,18 +169,35 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
     bySource.set(a.source, group);
   }
 
+  // Log source counts before trimming
+  const beforeCounts: string[] = [];
+  for (const [source, group] of bySource) {
+    beforeCounts.push(`${source}(${group.length})`);
+  }
+  console.log(`[classify] Sources before trim: ${beforeCounts.join(", ")}`);
+
   const articles: typeof allArticles = [];
   for (const [source, group] of bySource) {
-    if (group.length <= 3) {
+    if (group.length <= maxPerSource) {
       articles.push(...group);
     } else {
-      // Keep top 3 by title length (longer = more substance)
-      const sorted = group.sort((a, b) => b.rawTitle.length - a.rawTitle.length);
-      articles.push(...sorted.slice(0, 3));
-      const skipped = group.length - 3;
-      console.log(`[classify] Source diversity: kept 3/${group.length} from ${source} (skipped ${skipped})`);
+      // Keep top by description length (longer = more substance)
+      const sorted = group.sort(
+        (a, b) => (b.rawDescription?.length ?? 0) - (a.rawDescription?.length ?? 0)
+      );
+      articles.push(...sorted.slice(0, maxPerSource));
+      const skipped = group.length - maxPerSource;
+      console.log(`[classify] Source diversity: kept ${maxPerSource}/${group.length} from ${source} (skipped ${skipped})`);
     }
   }
+
+  // Log after trimming
+  const afterBySource = new Map<string, number>();
+  for (const a of articles) {
+    afterBySource.set(a.source, (afterBySource.get(a.source) ?? 0) + 1);
+  }
+  const afterCounts = Array.from(afterBySource.entries()).map(([s, c]) => `${s}(${c})`);
+  console.log(`[classify] Sources after trim: ${afterCounts.join(", ")}`);
 
   // Cap at MAX_ARTICLES_PER_RUN
   const batch = articles.slice(0, MAX_ARTICLES_PER_RUN);
@@ -192,33 +216,33 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
         await prisma.pipelineArticle.update({
           where: { id: article.id },
           data: {
-            stage: "FAILED",
-            failedAt: new Date(),
-            failureReason: "Classification model returned no response",
-            retryCount: { increment: 1 },
+            stage: "REJECTED",
+            classificationReason: "No response from classification model",
+            classifiedAt: new Date(),
           },
         });
+        rejected++;
         continue;
       }
 
       const parsed = parseJSON<ClassifyResult>(result.response);
 
       if (!parsed) {
-        console.warn(`[classify] Failed to parse response for: ${article.rawTitle}`);
+        console.warn(`[classify] Unparseable response for: ${article.rawTitle}`);
         await prisma.pipelineArticle.update({
           where: { id: article.id },
           data: {
-            stage: "FAILED",
-            failedAt: new Date(),
-            failureReason: "Failed to parse classification JSON",
-            retryCount: { increment: 1 },
+            stage: "REJECTED",
+            classificationReason: "Unparseable classification response",
+            classifiedAt: new Date(),
+            classifiedByModel: result.model,
           },
         });
+        rejected++;
         continue;
       }
 
       if (!parsed.isNews || parsed.qualityScore < 7) {
-        // Reject
         await prisma.pipelineArticle.update({
           where: { id: article.id },
           data: {
@@ -234,40 +258,44 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
         rejected++;
         console.log(`[classify] REJECTED: ${article.rawTitle} (quality=${parsed.qualityScore})`);
       } else {
-        // Pass
-        let articleType = VALID_ARTICLE_TYPES.includes(parsed.articleType)
-          ? (parsed.articleType as any)
-          : "DEEP_TECH";
-
-        const updateData = {
-          stage: "CLASSIFIED" as const,
-          articleType,
-          qualityScore: parsed.qualityScore,
-          relevanceScore: parsed.relevanceScore,
-          trendingScore: parsed.trendingScore,
-          classificationReason: parsed.reasoning,
-          classifiedAt: new Date(),
-          classifiedByModel: result.model,
-          suggestedTags: JSON.stringify(parsed.suggestedTags ?? []),
-        };
+        // Validate articleType BEFORE passing to Prisma (client-side validation)
+        const articleType = safeArticleType(parsed.articleType);
+        if (articleType !== parsed.articleType) {
+          console.warn(`[classify] Unknown type '${parsed.articleType}', mapped to DEEP_TECH`);
+        }
 
         try {
           await prisma.pipelineArticle.update({
             where: { id: article.id },
-            data: updateData,
+            data: {
+              stage: "CLASSIFIED",
+              articleType: articleType as any,
+              qualityScore: parsed.qualityScore,
+              relevanceScore: parsed.relevanceScore,
+              trendingScore: parsed.trendingScore,
+              classificationReason: parsed.reasoning,
+              classifiedAt: new Date(),
+              classifiedByModel: result.model,
+              suggestedTags: JSON.stringify(parsed.suggestedTags ?? []),
+            },
           });
-        } catch (enumErr: any) {
-          // If enum value doesn't exist in DB yet, fall back to DEEP_TECH
-          if (enumErr.message?.includes("invalid input value for enum")) {
-            console.warn(`[classify] Enum '${articleType}' not in DB, falling back to DEEP_TECH`);
-            articleType = "DEEP_TECH";
-            await prisma.pipelineArticle.update({
-              where: { id: article.id },
-              data: { ...updateData, articleType: "DEEP_TECH" },
-            });
-          } else {
-            throw enumErr;
-          }
+        } catch (updateErr: any) {
+          // If Prisma rejects the enum value for ANY reason, retry with DEEP_TECH
+          console.warn(`[classify] Update failed for type '${articleType}': ${updateErr.message}. Retrying with DEEP_TECH`);
+          await prisma.pipelineArticle.update({
+            where: { id: article.id },
+            data: {
+              stage: "CLASSIFIED",
+              articleType: "DEEP_TECH",
+              qualityScore: parsed.qualityScore,
+              relevanceScore: parsed.relevanceScore,
+              trendingScore: parsed.trendingScore,
+              classificationReason: parsed.reasoning,
+              classifiedAt: new Date(),
+              classifiedByModel: result.model,
+              suggestedTags: JSON.stringify(parsed.suggestedTags ?? []),
+            },
+          });
         }
         passed++;
         console.log(
@@ -276,15 +304,21 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
       }
     } catch (err: any) {
       console.error(`[classify] Error processing ${article.rawTitle}: ${err.message}`);
-      await prisma.pipelineArticle.update({
-        where: { id: article.id },
-        data: {
-          stage: "FAILED",
-          failedAt: new Date(),
-          failureReason: `Classification error: ${err.message}`,
-          retryCount: { increment: 1 },
-        },
-      });
+      // Don't crash the stage — mark as rejected and continue
+      try {
+        await prisma.pipelineArticle.update({
+          where: { id: article.id },
+          data: {
+            stage: "REJECTED",
+            classificationReason: `Classification error: ${err.message}`,
+            classifiedAt: new Date(),
+          },
+        });
+      } catch {
+        // Even the error handler failed — just log and move on
+        console.error(`[classify] Could not update article ${article.id} after error`);
+      }
+      rejected++;
     }
   }
 

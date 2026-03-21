@@ -64,29 +64,45 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
     return { unique: 0, duplicates: 0, updates: 0 };
   }
 
-  // Get recent comparison pool
-  const recentNews = await prisma.$queryRaw<{ id: string; title: string; summary: string | null; source: string | null }[]>`
-    SELECT id, title, summary, source FROM news
-    WHERE "publishedAt" > NOW() - INTERVAL '12 hours'
-  `;
+  // Get recent comparison pool — wrapped in try/catch so dedup doesn't crash
+  let recentPool: RecentArticle[] = [];
+  try {
+    const recentNews = await prisma.$queryRaw<{ id: string; title: string; summary: string | null; source: string | null }[]>`
+      SELECT id, title, summary, source FROM news
+      WHERE "publishedAt" > NOW() - INTERVAL '12 hours'
+    `;
 
-  const recentPipeline = await prisma.pipelineArticle.findMany({
-    where: {
-      stage: { in: ["DEDUPED", "CONTENT_GENERATED", "PUBLISHED"] },
-      updatedAt: { gte: new Date(Date.now() - 12 * 60 * 60 * 1000) },
-    },
-    select: {
-      id: true,
-      rawTitle: true,
-      generatedSummary: true,
-      source: true,
-    },
-  });
+    const recentPipeline = await prisma.pipelineArticle.findMany({
+      where: {
+        stage: { in: ["DEDUPED", "CONTENT_GENERATED", "PUBLISHED"] },
+        updatedAt: { gte: new Date(Date.now() - 12 * 60 * 60 * 1000) },
+      },
+      select: {
+        id: true,
+        rawTitle: true,
+        generatedSummary: true,
+        source: true,
+      },
+    });
 
-  const recentPool: RecentArticle[] = [
-    ...recentNews.map((n) => ({ title: n.title, summary: n.summary, id: n.id, source: n.source })),
-    ...recentPipeline.map((p) => ({ title: p.rawTitle, summary: p.generatedSummary, id: p.id, source: p.source })),
-  ];
+    recentPool = [
+      ...recentNews.map((n) => ({ title: n.title, summary: n.summary, id: n.id, source: n.source })),
+      ...recentPipeline.map((p) => ({ title: p.rawTitle, summary: p.generatedSummary, id: p.id, source: p.source })),
+    ];
+  } catch (poolErr: any) {
+    console.warn(`[dedup] Failed to fetch comparison pool: ${poolErr.message}`);
+    console.warn("[dedup] Auto-promoting all CLASSIFIED articles to DEDUPED");
+    await prisma.pipelineArticle.updateMany({
+      where: { stage: "CLASSIFIED" },
+      data: {
+        stage: "DEDUPED",
+        isDuplicate: false,
+        deduplicationReason: "Skipped dedup: comparison pool fetch failed",
+        deduplicatedAt: new Date(),
+      },
+    });
+    return { unique: articles.length, duplicates: 0, updates: 0 };
+  }
 
   let unique = 0;
   let duplicates = 0;

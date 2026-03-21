@@ -9,7 +9,8 @@
     "dev": "tsx src/index.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@extractus/article-extractor": "^8.0.0",

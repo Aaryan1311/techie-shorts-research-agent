@@ -123,7 +123,12 @@ async function fetchRedditFeeds(): Promise<FeedItem[]> {
   return items;
 }
 
-export async function runFetchStage(): Promise<number> {
+export interface FetchResult {
+  newCount: number;
+  sourceCounts: Record<string, number>;
+}
+
+export async function runFetchStage(): Promise<FetchResult> {
   console.log("[Stage 1] Fetching feeds...");
 
   const [rssItems, redditItems] = await Promise.all([
@@ -133,6 +138,7 @@ export async function runFetchStage(): Promise<number> {
 
   const allItems = [...rssItems, ...redditItems];
   let newCount = 0;
+  const sourceCounts: Record<string, number> = {};
 
   for (const item of allItems) {
     try {
@@ -155,6 +161,7 @@ export async function runFetchStage(): Promise<number> {
         },
       });
       newCount++;
+      sourceCounts[item.source] = (sourceCounts[item.source] ?? 0) + 1;
     } catch (err: any) {
       // Unique constraint violation — another run already inserted it
       if (err.code === "P2002") continue;
@@ -163,5 +170,5 @@ export async function runFetchStage(): Promise<number> {
   }
 
   console.log(`[Stage 1] Fetched ${allItems.length} items, ${newCount} new`);
-  return newCount;
+  return { newCount, sourceCounts };
 }
