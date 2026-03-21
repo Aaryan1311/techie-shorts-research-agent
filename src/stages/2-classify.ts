@@ -143,21 +143,45 @@ interface ClassifyResult {
 export async function runClassifyStage(): Promise<{ passed: number; rejected: number }> {
   console.log("[Stage 2] Classifying articles...");
 
-  const articles = await prisma.pipelineArticle.findMany({
+  const allArticles = await prisma.pipelineArticle.findMany({
     where: { stage: "FETCHED" },
     orderBy: { createdAt: "asc" },
-    take: MAX_ARTICLES_PER_RUN,
+    take: MAX_ARTICLES_PER_RUN * 2, // Fetch extra to allow filtering
   });
 
-  if (articles.length === 0) {
+  if (allArticles.length === 0) {
     console.log("[Stage 2] No articles to classify");
     return { passed: 0, rejected: 0 };
   }
 
+  // Source diversity: max 3 articles per source, prefer longer titles (more substance)
+  const bySource = new Map<string, typeof allArticles>();
+  for (const a of allArticles) {
+    const group = bySource.get(a.source) ?? [];
+    group.push(a);
+    bySource.set(a.source, group);
+  }
+
+  const articles: typeof allArticles = [];
+  for (const [source, group] of bySource) {
+    if (group.length <= 3) {
+      articles.push(...group);
+    } else {
+      // Keep top 3 by title length (longer = more substance)
+      const sorted = group.sort((a, b) => b.rawTitle.length - a.rawTitle.length);
+      articles.push(...sorted.slice(0, 3));
+      const skipped = group.length - 3;
+      console.log(`[classify] Source diversity: kept 3/${group.length} from ${source} (skipped ${skipped})`);
+    }
+  }
+
+  // Cap at MAX_ARTICLES_PER_RUN
+  const batch = articles.slice(0, MAX_ARTICLES_PER_RUN);
+
   let passed = 0;
   let rejected = 0;
 
-  for (const article of articles) {
+  for (const article of batch) {
     try {
       const userPrompt = `Title: ${article.rawTitle}\nDescription: ${article.rawDescription ?? "N/A"}\nSource: ${article.source}`;
 
@@ -211,24 +235,40 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
         console.log(`[classify] REJECTED: ${article.rawTitle} (quality=${parsed.qualityScore})`);
       } else {
         // Pass
-        const articleType = VALID_ARTICLE_TYPES.includes(parsed.articleType)
+        let articleType = VALID_ARTICLE_TYPES.includes(parsed.articleType)
           ? (parsed.articleType as any)
           : "DEEP_TECH";
 
-        await prisma.pipelineArticle.update({
-          where: { id: article.id },
-          data: {
-            stage: "CLASSIFIED",
-            articleType,
-            qualityScore: parsed.qualityScore,
-            relevanceScore: parsed.relevanceScore,
-            trendingScore: parsed.trendingScore,
-            classificationReason: parsed.reasoning,
-            classifiedAt: new Date(),
-            classifiedByModel: result.model,
-            suggestedTags: JSON.stringify(parsed.suggestedTags ?? []),
-          },
-        });
+        const updateData = {
+          stage: "CLASSIFIED" as const,
+          articleType,
+          qualityScore: parsed.qualityScore,
+          relevanceScore: parsed.relevanceScore,
+          trendingScore: parsed.trendingScore,
+          classificationReason: parsed.reasoning,
+          classifiedAt: new Date(),
+          classifiedByModel: result.model,
+          suggestedTags: JSON.stringify(parsed.suggestedTags ?? []),
+        };
+
+        try {
+          await prisma.pipelineArticle.update({
+            where: { id: article.id },
+            data: updateData,
+          });
+        } catch (enumErr: any) {
+          // If enum value doesn't exist in DB yet, fall back to DEEP_TECH
+          if (enumErr.message?.includes("invalid input value for enum")) {
+            console.warn(`[classify] Enum '${articleType}' not in DB, falling back to DEEP_TECH`);
+            articleType = "DEEP_TECH";
+            await prisma.pipelineArticle.update({
+              where: { id: article.id },
+              data: { ...updateData, articleType: "DEEP_TECH" },
+            });
+          } else {
+            throw enumErr;
+          }
+        }
         passed++;
         console.log(
           `[classify] PASSED: ${article.rawTitle} → ${articleType} (quality=${parsed.qualityScore})`
@@ -248,6 +288,6 @@ export async function runClassifyStage(): Promise<{ passed: number; rejected: nu
     }
   }
 
-  console.log(`[Stage 2] Classified ${articles.length}: ${passed} passed, ${rejected} rejected`);
+  console.log(`[Stage 2] Classified ${batch.length}: ${passed} passed, ${rejected} rejected`);
   return { passed, rejected };
 }

@@ -47,6 +47,7 @@ interface RecentArticle {
   title: string;
   summary: string | null;
   id: string;
+  source: string | null;
 }
 
 export async function runDeduplicateStage(): Promise<{ unique: number; duplicates: number; updates: number }> {
@@ -64,8 +65,8 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
   }
 
   // Get recent comparison pool
-  const recentNews = await prisma.$queryRaw<{ id: string; title: string; summary: string | null }[]>`
-    SELECT id, title, summary FROM news
+  const recentNews = await prisma.$queryRaw<{ id: string; title: string; summary: string | null; source: string | null }[]>`
+    SELECT id, title, summary, source FROM news
     WHERE "publishedAt" > NOW() - INTERVAL '12 hours'
   `;
 
@@ -78,12 +79,13 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
       id: true,
       rawTitle: true,
       generatedSummary: true,
+      source: true,
     },
   });
 
   const recentPool: RecentArticle[] = [
-    ...recentNews.map((n) => ({ title: n.title, summary: n.summary, id: n.id })),
-    ...recentPipeline.map((p) => ({ title: p.rawTitle, summary: p.generatedSummary, id: p.id })),
+    ...recentNews.map((n) => ({ title: n.title, summary: n.summary, id: n.id, source: n.source })),
+    ...recentPipeline.map((p) => ({ title: p.rawTitle, summary: p.generatedSummary, id: p.id, source: p.source })),
   ];
 
   let unique = 0;
@@ -95,13 +97,17 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
       const newWords = extractSignificantWords(article.rawTitle);
 
       // Find potential duplicates by keyword overlap
+      // Threshold: 2+ keyword matches, or 1+ if same source domain
       let bestMatch: { article: RecentArticle; overlap: number } | null = null;
 
       for (const recent of recentPool) {
         const recentWords = extractSignificantWords(recent.title);
         const overlap = countOverlap(newWords, recentWords);
 
-        if (overlap >= 3) {
+        const sameSource = !!(article.source && recent.source && article.source === recent.source);
+        const threshold = sameSource ? 1 : 2;
+
+        if (overlap >= threshold) {
           if (!bestMatch || overlap > bestMatch.overlap) {
             bestMatch = { article: recent, overlap };
           }
@@ -120,7 +126,7 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
         });
         unique++;
         // Add to pool so subsequent articles in this batch can dedup against it
-        recentPool.push({ title: article.rawTitle, summary: article.rawDescription, id: article.id });
+        recentPool.push({ title: article.rawTitle, summary: article.rawDescription, id: article.id, source: article.source });
         continue;
       }
 
@@ -188,7 +194,7 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
           },
         });
         updates++;
-        recentPool.push({ title: article.rawTitle, summary: article.rawDescription, id: article.id });
+        recentPool.push({ title: article.rawTitle, summary: article.rawDescription, id: article.id, source: article.source });
         console.log(`[dedup] UPDATE: "${article.rawTitle}" (more detail than existing)`);
       } else {
         // DIFFERENT
@@ -202,7 +208,7 @@ export async function runDeduplicateStage(): Promise<{ unique: number; duplicate
           },
         });
         unique++;
-        recentPool.push({ title: article.rawTitle, summary: article.rawDescription, id: article.id });
+        recentPool.push({ title: article.rawTitle, summary: article.rawDescription, id: article.id, source: article.source });
       }
     } catch (err: any) {
       console.error(`[dedup] Error processing ${article.rawTitle}: ${err.message}`);

@@ -45,10 +45,13 @@ export async function runSetupStage(): Promise<void> {
       await prisma.$executeRawUnsafe(
         `ALTER TYPE "ArticleType" ADD VALUE IF NOT EXISTS '${value}'`
       );
+      console.log(`[setup] Enum value '${value}': OK`);
     } catch (err: any) {
-      // "already exists" is fine
-      if (!err.message?.includes("already exists")) {
-        console.warn(`[setup] Enum add failed for ${value}: ${err.message}`);
+      if (err.message?.includes("already exists")) {
+        console.log(`[setup] Enum value '${value}': already exists`);
+      } else {
+        console.error(`[setup] FAILED to add enum value '${value}': ${err.message}`);
+        console.error(`[setup] Full error:`, err);
       }
     }
   }
