@@ -55,7 +55,13 @@ export const RATE_LIMITS = {
 
 export const MAX_ARTICLES_PER_RUN = 25;
 
-export const PIPELINE_CRON = "*/30 * * * *"; // Every 30 minutes
+export const PIPELINE_CRON = "0 */2 * * *"; // Every 2 hours
+
+export const DAILY_LIMITS = {
+  maxClassifyPerDay: 100,
+  maxGeneratePerDay: 50,
+  maxTotalLLMCalls: 300,
+};
 
 export const SOURCE_TRUST: Record<string, number> = {
   // High trust (8-10): established publications with editorial standards

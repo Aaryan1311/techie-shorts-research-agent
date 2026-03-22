@@ -2,11 +2,27 @@ import Groq from "groq-sdk";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+// Global rate-limit flag: when true, all subsequent calls should be skipped
+let _rateLimited = false;
+
+export function isRateLimited(): boolean {
+  return _rateLimited;
+}
+
+export function setRateLimited(value: boolean): void {
+  _rateLimited = value;
+}
+
 export async function callGroq(
   systemPrompt: string,
   userPrompt: string,
   model: string
 ): Promise<string | null> {
+  if (_rateLimited) {
+    console.warn(`[Groq/${model}] Skipping — rate limited for this run`);
+    return null;
+  }
+
   try {
     const response = await groq.chat.completions.create({
       model,
@@ -20,6 +36,41 @@ export async function callGroq(
 
     return response.choices[0]?.message?.content ?? null;
   } catch (err: any) {
+    // Handle 429 rate limit
+    if (err.status === 429 || err.statusCode === 429) {
+      const retryAfter = err.headers?.["retry-after"];
+      const waitSec = retryAfter ? parseInt(retryAfter, 10) : 60;
+      console.warn(`[Groq/${model}] Rate limited (429). Retry-after: ${waitSec}s`);
+
+      if (waitSec <= 120) {
+        // Wait and retry once if reasonable
+        console.log(`[Groq/${model}] Waiting ${waitSec}s before retry...`);
+        await new Promise((r) => setTimeout(r, waitSec * 1000));
+
+        try {
+          const retryResponse = await groq.chat.completions.create({
+            model,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0.3,
+            max_tokens: 4096,
+          });
+          return retryResponse.choices[0]?.message?.content ?? null;
+        } catch (retryErr: any) {
+          console.error(`[Groq/${model}] Retry also failed. Marking rate-limited for this run.`);
+          _rateLimited = true;
+          throw retryErr;
+        }
+      } else {
+        // Too long to wait — skip rest of run
+        console.error(`[Groq/${model}] Wait too long (${waitSec}s). Marking rate-limited for this run.`);
+        _rateLimited = true;
+        throw err;
+      }
+    }
+
     console.error(`[Groq/${model}] Error:`, err.message);
     throw err;
   }

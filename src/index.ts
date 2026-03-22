@@ -1,7 +1,7 @@
 import "dotenv/config";
 import cron from "node-cron";
 import prisma from "./db";
-import { PIPELINE_CRON } from "./config";
+import { PIPELINE_CRON, DAILY_LIMITS } from "./config";
 import { runSetupStage } from "./stages/0-setup";
 import { runFetchStage, FetchResult } from "./stages/1-fetch";
 import { runClassifyStage } from "./stages/2-classify";
@@ -11,6 +11,8 @@ import { runVerifyStage } from "./stages/5-verify";
 import { runGenerateStage } from "./stages/6-generate";
 import { runQAReviewStage } from "./stages/7-qa-review";
 import { runPublishStage } from "./stages/8-publish";
+import { getLLMCounts } from "./models/model-router";
+import { setRateLimited } from "./models/groq";
 
 const STUCK_PROMOTIONS: { from: string; to: string; field: string }[] = [
   { from: "CLASSIFIED", to: "SOURCE_READ", field: "classifiedAt" },
@@ -38,16 +40,40 @@ async function unstickArticles(): Promise<void> {
       if (result.count > 0) {
         console.log(`[Pipeline] Auto-promoted ${result.count} stuck ${promo.from} → ${promo.to}`);
       }
-    } catch (err: any) {
-      // Non-critical — some stages might not have the date field set
+    } catch {
+      // Non-critical
     }
   }
+}
+
+function checkBudget(stage: string): boolean {
+  const counts = getLLMCounts();
+
+  if (counts.total >= DAILY_LIMITS.maxTotalLLMCalls) {
+    console.warn(`[Pipeline] Daily LLM budget reached (${counts.total}/${DAILY_LIMITS.maxTotalLLMCalls}) — skipping ${stage}`);
+    return false;
+  }
+
+  if (stage === "classify" && counts.classify >= DAILY_LIMITS.maxClassifyPerDay) {
+    console.warn(`[Pipeline] Daily classify budget reached (${counts.classify}/${DAILY_LIMITS.maxClassifyPerDay}) — skipping`);
+    return false;
+  }
+
+  if (stage === "generate" && counts.generate >= DAILY_LIMITS.maxGeneratePerDay) {
+    console.warn(`[Pipeline] Daily generate budget reached (${counts.generate}/${DAILY_LIMITS.maxGeneratePerDay}) — skipping`);
+    return false;
+  }
+
+  return true;
 }
 
 async function runPipeline(): Promise<void> {
   const start = new Date();
   console.log(`\n🚀 Pipeline run starting at ${start.toISOString()}`);
   console.log("═".repeat(60));
+
+  // Reset rate-limit flag at start of each run
+  setRateLimited(false);
 
   let fetchResult: FetchResult = { newCount: 0, sourceCounts: {} };
   let classified = { passed: 0, rejected: 0 };
@@ -83,15 +109,25 @@ async function runPipeline(): Promise<void> {
     errors++;
   }
 
-  // Stage 2: Classify
-  try {
-    classified = await runClassifyStage();
-  } catch (err: any) {
-    console.error("[Pipeline] Stage 2 (Classify) failed:", err.message);
-    errors++;
+  // Skip remaining stages if no new articles
+  if (fetchResult.newCount === 0) {
+    const elapsed = ((Date.now() - start.getTime()) / 1000).toFixed(1);
+    console.log("═".repeat(60));
+    console.log(`⏭️  No new articles — skipping pipeline (${elapsed}s)`);
+    return;
   }
 
-  // Stage 3: Read Source
+  // Stage 2: Classify
+  if (checkBudget("classify")) {
+    try {
+      classified = await runClassifyStage();
+    } catch (err: any) {
+      console.error("[Pipeline] Stage 2 (Classify) failed:", err.message);
+      errors++;
+    }
+  }
+
+  // Stage 3: Read Source (no LLM calls)
   try {
     sourceRead = await runReadSourceStage();
   } catch (err: any) {
@@ -100,38 +136,46 @@ async function runPipeline(): Promise<void> {
   }
 
   // Stage 4: Deduplicate
-  try {
-    deduped = await runDeduplicateStage();
-  } catch (err: any) {
-    console.error("[Pipeline] Stage 4 (Deduplicate) failed:", err.message);
-    errors++;
+  if (checkBudget("classify")) {
+    try {
+      deduped = await runDeduplicateStage();
+    } catch (err: any) {
+      console.error("[Pipeline] Stage 4 (Deduplicate) failed:", err.message);
+      errors++;
+    }
   }
 
   // Stage 5: Verify
-  try {
-    verified = await runVerifyStage();
-  } catch (err: any) {
-    console.error("[Pipeline] Stage 5 (Verify) failed:", err.message);
-    errors++;
+  if (checkBudget("classify")) {
+    try {
+      verified = await runVerifyStage();
+    } catch (err: any) {
+      console.error("[Pipeline] Stage 5 (Verify) failed:", err.message);
+      errors++;
+    }
   }
 
   // Stage 6: Generate
-  try {
-    generated = await runGenerateStage();
-  } catch (err: any) {
-    console.error("[Pipeline] Stage 6 (Generate) failed:", err.message);
-    errors++;
+  if (checkBudget("generate")) {
+    try {
+      generated = await runGenerateStage();
+    } catch (err: any) {
+      console.error("[Pipeline] Stage 6 (Generate) failed:", err.message);
+      errors++;
+    }
   }
 
   // Stage 7: QA Review
-  try {
-    qaResult = await runQAReviewStage();
-  } catch (err: any) {
-    console.error("[Pipeline] Stage 7 (QA Review) failed:", err.message);
-    errors++;
+  if (checkBudget("classify")) {
+    try {
+      qaResult = await runQAReviewStage();
+    } catch (err: any) {
+      console.error("[Pipeline] Stage 7 (QA Review) failed:", err.message);
+      errors++;
+    }
   }
 
-  // Stage 8: Publish
+  // Stage 8: Publish (no LLM calls)
   try {
     published = await runPublishStage();
   } catch (err: any) {
@@ -153,6 +197,7 @@ async function runPipeline(): Promise<void> {
   }
 
   // Detailed summary
+  const counts = getLLMCounts();
   const elapsed = ((Date.now() - start.getTime()) / 1000).toFixed(1);
   console.log("═".repeat(60));
   console.log(`✅ Pipeline complete in ${elapsed}s`);
@@ -175,6 +220,7 @@ async function runPipeline(): Promise<void> {
   console.log(`   Published: ${published} articles`);
   console.log(`   Failed: ${failed}`);
   console.log(`   Errors: ${errors}`);
+  console.log(`   LLM calls today: ${counts.total}/${DAILY_LIMITS.maxTotalLLMCalls} (classify: ${counts.classify}, generate: ${counts.generate})`);
 }
 
 async function main(): Promise<void> {
