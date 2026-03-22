@@ -212,21 +212,70 @@ export async function runGenerateStage(): Promise<number> {
         }
       }
 
-      const futureImpact = parsed.whatsNext
+      let futureImpact = parsed.whatsNext
         ? formatFutureImpact(parsed.whatsNext)
         : null;
 
-      const buildOnThis = parsed.whatsNext?.buildIdeas
+      let buildOnThis = parsed.whatsNext?.buildIdeas
         ? formatBuildIdeas(parsed.whatsNext.buildIdeas)
         : null;
+
+      let finalDetail = ensureString(parsed.detailContent) ?? "";
+      let finalHeadline = ensureString(parsed.headline) ?? "";
+
+      // Validate completeness and retry missing fields
+      const issues: string[] = [];
+      if (finalHeadline.length < 10) issues.push("no headline");
+      if (finalSummary.split(/\s+/).length < 40) issues.push("summary too short");
+      if (finalDetail.length < 200) issues.push("detail too short");
+      if (!futureImpact || futureImpact.length < 100) issues.push("whatsNext too short");
+
+      if (issues.length > 0) {
+        console.warn(`[generate] Incomplete output for ${article.rawTitle}: ${issues.join(", ")}. Retrying...`);
+        try {
+          const sourceText = article.fullArticleText
+            ? article.fullArticleText.split(/\s+/).slice(0, 1000).join(" ")
+            : article.rawDescription ?? "N/A";
+
+          const retryPrompt = `The previous generation was incomplete. Please generate ONLY the missing fields.\n\nArticle: ${article.rawTitle}\nSource: ${article.source}\nSource content: ${sourceText}\n\nMissing fields: ${issues.join(", ")}\n\nReturn ONLY valid JSON with these fields:\n{\n  "headline": "catchy headline",\n  "summary": "60-80 word summary",\n  "detailContent": "300+ word detailed article",\n  "whatsNext": {\n    "industryImpact": "150-200 words",\n    "personalImpact": "100-150 words",\n    "buildIdeas": null\n  }\n}`;
+          const retryResult = await callModel("generate", BASE_SYSTEM_PROMPT, retryPrompt);
+          if (retryResult) {
+            const retryParsed = parseJSON<GenerateResult>(retryResult.response);
+            if (retryParsed) {
+              // Fill in only the missing fields
+              if (finalHeadline.length < 10 && retryParsed.headline) {
+                finalHeadline = ensureString(retryParsed.headline) ?? finalHeadline;
+              }
+              if (finalSummary.split(/\s+/).length < 40 && retryParsed.summary) {
+                const retrySummary = ensureString(retryParsed.summary) ?? "";
+                if (retrySummary.split(/\s+/).length >= 40) finalSummary = retrySummary;
+              }
+              if (finalDetail.length < 200 && retryParsed.detailContent) {
+                const retryDetail = ensureString(retryParsed.detailContent) ?? "";
+                if (retryDetail.length >= 200) finalDetail = retryDetail;
+              }
+              if ((!futureImpact || futureImpact.length < 100) && retryParsed.whatsNext) {
+                const retryImpact = formatFutureImpact(retryParsed.whatsNext);
+                if (retryImpact && retryImpact.length >= 100) futureImpact = retryImpact;
+                if (retryParsed.whatsNext?.buildIdeas) {
+                  buildOnThis = formatBuildIdeas(retryParsed.whatsNext.buildIdeas);
+                }
+              }
+              console.log(`[generate] Retry filled in missing fields for: ${article.rawTitle}`);
+            }
+          }
+        } catch {
+          // Retry failed — continue with what we have
+        }
+      }
 
       await prisma.pipelineArticle.update({
         where: { id: article.id },
         data: {
           stage: "CONTENT_GENERATED",
-          generatedHeadline: ensureString(parsed.headline),
+          generatedHeadline: finalHeadline,
           generatedSummary: finalSummary,
-          generatedDetail: ensureString(parsed.detailContent),
+          generatedDetail: finalDetail,
           generatedWhatsNext: futureImpact,
           generatedBuildOnThis: buildOnThis,
           generatedAt: new Date(),
@@ -253,6 +302,48 @@ export async function runGenerateStage(): Promise<number> {
 
   console.log(`[Stage 6] Generated content for ${generated}/${articles.length} articles`);
   return generated;
+}
+
+// Single-article generation for QA re-runs
+export async function generateForArticle(articleId: string): Promise<boolean> {
+  const article = await prisma.pipelineArticle.findUnique({ where: { id: articleId } });
+  if (!article) return false;
+
+  const articleType = article.articleType ?? "DEEP_TECH";
+  const typePrompt = TYPE_PROMPTS[articleType] ?? TYPE_PROMPTS.DEEP_TECH;
+  const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\n${typePrompt}`;
+
+  let userPrompt = `Source article title: ${article.rawTitle}\nSource: ${article.source}\nSource description: ${article.rawDescription ?? "N/A"}\nArticle Type: ${articleType}`;
+
+  if (article.fullArticleText && article.sourceReadSuccess) {
+    const truncatedText = article.fullArticleText.split(/\s+/).slice(0, 1500).join(" ");
+    userPrompt += `\n\nFull source article:\n${truncatedText}\n\nIMPORTANT: Base your detailed article on the FACTS above. Do NOT make up facts.`;
+  }
+
+  const result = await callModel("generate", systemPrompt, userPrompt);
+  if (!result) return false;
+
+  const parsed = parseJSON<GenerateResult>(result.response);
+  if (!parsed || !parsed.headline || !parsed.summary) return false;
+
+  const futureImpact = parsed.whatsNext ? formatFutureImpact(parsed.whatsNext) : null;
+  const buildOnThis = parsed.whatsNext?.buildIdeas ? formatBuildIdeas(parsed.whatsNext.buildIdeas) : null;
+
+  await prisma.pipelineArticle.update({
+    where: { id: articleId },
+    data: {
+      stage: "CONTENT_GENERATED",
+      generatedHeadline: ensureString(parsed.headline),
+      generatedSummary: ensureString(parsed.summary),
+      generatedDetail: ensureString(parsed.detailContent),
+      generatedWhatsNext: futureImpact,
+      generatedBuildOnThis: buildOnThis,
+      generatedAt: new Date(),
+      generatedByModel: result.model,
+    },
+  });
+
+  return true;
 }
 
 export async function regenerateIncomplete(): Promise<number> {

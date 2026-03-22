@@ -98,7 +98,7 @@ async function runPipeline(): Promise<void> {
   let verified = { passed: 0, failed: 0 };
   let generated = 0;
   let qaResult = { published: 0, revised: 0, rejected: 0 };
-  let published = 0;
+  let publishResult = { published: 0, sentBack: 0 };
   let errors = 0;
 
   try {
@@ -201,10 +201,29 @@ async function runPipeline(): Promise<void> {
     // Stage 8: Publish (no LLM calls)
     await logPending("Stage 8", "QA_PASSED");
     try {
-      published = await runPublishStage();
+      publishResult = await runPublishStage();
     } catch (err: any) {
       console.error("[Pipeline] Stage 8 (Publish) failed:", err.message);
       errors++;
+    }
+
+    // Check for articles stuck at CONTENT_GENERATED (failed QA or incomplete)
+    try {
+      const stuckCG = await prisma.pipelineArticle.count({
+        where: {
+          stage: "CONTENT_GENERATED",
+          createdAt: { gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },
+        },
+      });
+      if (stuckCG > 0) {
+        console.log(`[Pipeline] ${stuckCG} articles stuck at CONTENT_GENERATED — re-running QA + publish`);
+        if (checkBudget("classify")) {
+          try { await runQAReviewStage(); } catch { /* logged inside */ }
+          try { await runPublishStage(); } catch { /* logged inside */ }
+        }
+      }
+    } catch {
+      // Non-critical
     }
 
     // Regenerate incomplete articles from previous runs
@@ -252,7 +271,8 @@ async function runPipeline(): Promise<void> {
     console.log(`   Verified: ${verified.passed} passed, ${verified.failed} rejected`);
     console.log(`   Generated: ${generated} articles`);
     console.log(`   QA Review: ${qaResult.published} passed, ${qaResult.revised} revised, ${qaResult.rejected} rejected`);
-    console.log(`   Published: ${published} articles`);
+    console.log(`   Published: ${publishResult.published} articles`);
+    if (publishResult.sentBack > 0) console.log(`   Incomplete (sent back): ${publishResult.sentBack} articles`);
     if (regenerated > 0) console.log(`   Regenerated: ${regenerated} incomplete articles`);
     console.log(`   Failed: ${failed}`);
     console.log(`   Errors: ${errors}`);

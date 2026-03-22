@@ -6,7 +6,26 @@ function generateCuid(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 25);
 }
 
-export async function runPublishStage(): Promise<number> {
+function isArticleComplete(article: any): { complete: boolean; missing: string[] } {
+  const missing: string[] = [];
+
+  if (!article.generatedHeadline || article.generatedHeadline.trim().length < 10) {
+    missing.push("headline");
+  }
+  if (!article.generatedSummary || article.generatedSummary.trim().length < 100) {
+    missing.push(`summary (too short: ${article.generatedSummary?.length || 0} chars)`);
+  }
+  if (!article.generatedDetail || article.generatedDetail.trim().length < 200) {
+    missing.push(`detailContent (too short: ${article.generatedDetail?.length || 0} chars)`);
+  }
+  if (!article.generatedWhatsNext || article.generatedWhatsNext.trim().length < 100) {
+    missing.push(`whatsNext (too short: ${article.generatedWhatsNext?.length || 0} chars)`);
+  }
+
+  return { complete: missing.length === 0, missing };
+}
+
+export async function runPublishStage(): Promise<{ published: number; sentBack: number }> {
   console.log("[Stage 8] Publishing articles...");
 
   const articles = await prisma.pipelineArticle.findMany({
@@ -16,13 +35,29 @@ export async function runPublishStage(): Promise<number> {
 
   if (articles.length === 0) {
     console.log("[Stage 8] No articles to publish");
-    return 0;
+    return { published: 0, sentBack: 0 };
   }
 
   let published = 0;
+  let sentBack = 0;
 
   for (const article of articles) {
     try {
+      // Validate completeness before publishing
+      const { complete, missing } = isArticleComplete(article);
+      if (!complete) {
+        console.warn(`[publish] INCOMPLETE: ${article.rawTitle} — missing: ${missing.join(", ")}. Sent back to generate.`);
+        await prisma.pipelineArticle.update({
+          where: { id: article.id },
+          data: {
+            stage: "VERIFIED", // Send back to Stage 6
+            retryCount: { increment: 1 },
+          },
+        });
+        sentBack++;
+        continue;
+      }
+
       // Check if already published to news table
       const existing = await prisma.$queryRaw<{ id: string }[]>`
         SELECT id FROM news WHERE "sourceUrl" = ${article.sourceUrl} LIMIT 1
@@ -119,6 +154,6 @@ export async function runPublishStage(): Promise<number> {
     }
   }
 
-  console.log(`[Stage 8] Published ${published}/${articles.length} articles`);
-  return published;
+  console.log(`[Stage 8] Published ${published}, sent back ${sentBack} incomplete`);
+  return { published, sentBack };
 }

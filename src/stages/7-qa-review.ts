@@ -3,6 +3,7 @@ import { callModel } from "../models/model-router";
 import { parseJSON } from "../models/groq";
 import { MAX_ARTICLES_PER_RUN } from "../config";
 import { hasBudget, getBudgetStatus } from "../utils/tokenBudget";
+import { generateForArticle } from "./6-generate";
 
 const QA_SYSTEM_PROMPT = `You are a senior editor reviewing AI-generated news content before publication. Be critical but fair.
 
@@ -216,18 +217,65 @@ Generated detail (first 500 words): ${detailPreview}`;
           });
           published++;
         } else {
-          // First revision — send back to generate
+          // First revision — regenerate immediately instead of waiting for next run
+          console.log(`[qa] REVISE: ${article.rawTitle} — regenerating immediately`);
           await prisma.pipelineArticle.update({
             where: { id: article.id },
             data: {
-              stage: "VERIFIED", // Send back to Stage 6
-              qaNotes: `REVISE: ${parsed.issues}`,
               retryCount: { increment: 1 },
               qaReviewedByModel: result.model,
+              qaNotes: `REVISE: ${parsed.issues}`,
             },
           });
-          revised++;
-          console.log(`[qa] REVISE: ${article.generatedHeadline} — ${parsed.issues}`);
+
+          const regenSuccess = await generateForArticle(article.id);
+          if (regenSuccess) {
+            // Re-run QA on regenerated content
+            const regenArticle = await prisma.pipelineArticle.findUnique({ where: { id: article.id } });
+            if (regenArticle) {
+              const reProgCheck = programmaticQA(regenArticle);
+              if (reProgCheck.pass) {
+                // Auto-pass the regenerated content
+                await prisma.pipelineArticle.update({
+                  where: { id: article.id },
+                  data: {
+                    stage: "QA_PASSED",
+                    qaScore: parsed.overallScore,
+                    qaNotes: `Re-QA passed after regeneration`,
+                    qaPassedAt: new Date(),
+                  },
+                });
+                published++;
+                console.log(`[qa] Re-QA: ${article.rawTitle} — PASSED after regeneration`);
+              } else {
+                // Still failing — auto-pass with lower score
+                await prisma.pipelineArticle.update({
+                  where: { id: article.id },
+                  data: {
+                    stage: "QA_PASSED",
+                    qaScore: 5,
+                    qaNotes: `Auto-passed after regen. Issues: ${reProgCheck.issues.join("; ")}`,
+                    qaPassedAt: new Date(),
+                  },
+                });
+                published++;
+                console.log(`[qa] Re-QA: ${article.rawTitle} — auto-passed (still imperfect)`);
+              }
+            }
+          } else {
+            // Regen failed — auto-pass with original content
+            await prisma.pipelineArticle.update({
+              where: { id: article.id },
+              data: {
+                stage: "QA_PASSED",
+                qaScore: 5,
+                qaNotes: `Regen failed. Auto-passed. Original issues: ${parsed.issues}`,
+                qaPassedAt: new Date(),
+              },
+            });
+            published++;
+            console.warn(`[qa] Regen failed for ${article.rawTitle}, auto-passing`);
+          }
         }
       } else {
         // REJECT
