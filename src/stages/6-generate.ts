@@ -1,8 +1,9 @@
 import { ArticleType } from "@prisma/client";
 import prisma from "../db";
-import { callModel } from "../models/model-router";
+import { callModel, callModelDirect } from "../models/model-router";
 import { parseJSON } from "../models/groq";
 import { MAX_ARTICLES_PER_RUN } from "../config";
+import { hasBudget, getBudgetStatus } from "../utils/tokenBudget";
 
 const BASE_SYSTEM_PROMPT = `You are a tech journalist writing for Techie Shorts, a news app for tech professionals.
 
@@ -105,6 +106,11 @@ function formatFutureImpact(whatsNext: GenerateResult["whatsNext"]): string | nu
 export async function runGenerateStage(): Promise<number> {
   console.log("[Stage 6] Generating content...");
 
+  if (!hasBudget()) {
+    console.warn(`[Stage 6] Daily token budget exhausted (${getBudgetStatus()}). Will resume tomorrow.`);
+    return 0;
+  }
+
   const articles = await prisma.pipelineArticle.findMany({
     where: { stage: "VERIFIED" },
     orderBy: { verifiedAt: "asc" },
@@ -128,12 +134,22 @@ export async function runGenerateStage(): Promise<number> {
       // Build user prompt with full article text when available
       let userPrompt = `Source article title: ${article.rawTitle}\nSource: ${article.source}\nSource description: ${article.rawDescription ?? "N/A"}\nArticle Type: ${articleType}`;
 
+      const sourceWordCount = article.fullArticleText?.split(/\s+/).length ?? 0;
+
       if (article.fullArticleText && article.sourceReadSuccess) {
         const truncatedText = article.fullArticleText.split(/\s+/).slice(0, 1500).join(" ");
         userPrompt += `\n\nFull source article (use this as the primary source of facts):\n${truncatedText}\n\nIMPORTANT: Base your detailed article on the FACTS in the source article above. Do NOT make up facts, quotes, numbers, or details that aren't in the source. If the source doesn't provide enough detail, say so honestly rather than fabricating.`;
       }
 
-      const result = await callModel("generate", systemPrompt, userPrompt);
+      // Smart model selection: use 8b for short sources, 70b for rich sources
+      let result;
+      if (sourceWordCount < 500) {
+        console.log(`[generate] Using 8b (short source: ${sourceWordCount} words)`);
+        result = await callModelDirect("llama-3.1-8b-instant", "groq", systemPrompt, userPrompt);
+      } else {
+        console.log(`[generate] Using 70b (rich source: ${sourceWordCount} words)`);
+        result = await callModel("generate", systemPrompt, userPrompt);
+      }
 
       if (!result) {
         console.warn(`[generate] No response for: ${article.rawTitle}`);

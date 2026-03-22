@@ -2,6 +2,7 @@ import prisma from "../db";
 import { callModel } from "../models/model-router";
 import { parseJSON } from "../models/groq";
 import { MAX_ARTICLES_PER_RUN } from "../config";
+import { hasBudget, getBudgetStatus } from "../utils/tokenBudget";
 
 const CLASSIFY_SYSTEM_PROMPT = `You are the chief editor of Techie Shorts — a tech culture news app for people who work in and around technology. Your audience includes developers, designers, PMs, QA engineers, data analysts, DevOps engineers, competitive programmers, tech founders, and anyone passionate about technology.
 
@@ -130,8 +131,27 @@ const SAFE_ARTICLE_TYPES = new Set([
   "COOL_TECH", "CAREER_CULTURE",
 ]);
 
+const TYPE_ALIASES: Record<string, string> = {
+  "TECH_PERSONALITIES": "STATEMENT",
+  "AI & MACHINE LEARNING": "DEEP_TECH",
+  "AI_ML": "DEEP_TECH",
+  "CAREER": "CAREER_CULTURE",
+  "GAMING": "GAMING_GADGETS",
+  "GADGETS": "GAMING_GADGETS",
+  "UX": "DESIGN",
+  "OPEN_SOURCE": "DEEP_TECH",
+  "FUNDING": "BUSINESS",
+  "ACQUISITION": "BUSINESS",
+  "LAYOFF": "BUSINESS",
+  "REGULATION": "STATEMENT",
+};
+
 function safeArticleType(raw: string): string {
-  return SAFE_ARTICLE_TYPES.has(raw) ? raw : "DEEP_TECH";
+  const upper = raw.toUpperCase().trim();
+  if (SAFE_ARTICLE_TYPES.has(upper)) return upper;
+  if (TYPE_ALIASES[upper]) return TYPE_ALIASES[upper];
+  console.log(`[classify] Unknown type '${raw}', mapped to DEEP_TECH`);
+  return "DEEP_TECH";
 }
 
 interface ClassifyResult {
@@ -147,6 +167,11 @@ interface ClassifyResult {
 
 export async function runClassifyStage(): Promise<{ passed: number; rejected: number }> {
   console.log("[Stage 2] Classifying articles...");
+
+  if (!hasBudget()) {
+    console.warn(`[Stage 2] Daily token budget exhausted (${getBudgetStatus()}). Will resume tomorrow.`);
+    return { passed: 0, rejected: 0 };
+  }
 
   const allArticles = await prisma.pipelineArticle.findMany({
     where: { stage: "FETCHED" },

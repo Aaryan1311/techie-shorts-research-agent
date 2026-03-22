@@ -2,6 +2,7 @@ import prisma from "../db";
 import { callModel } from "../models/model-router";
 import { parseJSON } from "../models/groq";
 import { MAX_ARTICLES_PER_RUN } from "../config";
+import { hasBudget, getBudgetStatus } from "../utils/tokenBudget";
 
 const QA_SYSTEM_PROMPT = `You are a senior editor reviewing AI-generated news content before publication. Be critical but fair.
 
@@ -72,6 +73,11 @@ function programmaticQA(article: any): { pass: boolean; issues: string[] } {
 
 export async function runQAReviewStage(): Promise<{ published: number; revised: number; rejected: number }> {
   console.log("[Stage 7] QA reviewing articles...");
+
+  if (!hasBudget()) {
+    console.warn(`[Stage 7] Daily token budget exhausted (${getBudgetStatus()}). Will resume tomorrow.`);
+    return { published: 0, revised: 0, rejected: 0 };
+  }
 
   const articles = await prisma.pipelineArticle.findMany({
     where: { stage: "CONTENT_GENERATED" },

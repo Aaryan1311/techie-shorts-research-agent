@@ -1,4 +1,5 @@
 import Groq from "groq-sdk";
+import { trackTokens } from "../utils/tokenBudget";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -11,6 +12,10 @@ export function isRateLimited(): boolean {
 
 export function setRateLimited(value: boolean): void {
   _rateLimited = value;
+}
+
+function estimateTokens(systemPrompt: string, userPrompt: string, output: string): number {
+  return Math.ceil((systemPrompt.length + userPrompt.length + output.length) / 4);
 }
 
 export async function callGroq(
@@ -34,7 +39,11 @@ export async function callGroq(
       max_tokens: 4096,
     });
 
-    return response.choices[0]?.message?.content ?? null;
+    const output = response.choices[0]?.message?.content ?? null;
+    if (output) {
+      trackTokens(estimateTokens(systemPrompt, userPrompt, output));
+    }
+    return output;
   } catch (err: any) {
     // Handle 429 rate limit
     if (err.status === 429 || err.statusCode === 429) {
@@ -43,7 +52,6 @@ export async function callGroq(
       console.warn(`[Groq/${model}] Rate limited (429). Retry-after: ${waitSec}s`);
 
       if (waitSec <= 120) {
-        // Wait and retry once if reasonable
         console.log(`[Groq/${model}] Waiting ${waitSec}s before retry...`);
         await new Promise((r) => setTimeout(r, waitSec * 1000));
 
@@ -57,14 +65,17 @@ export async function callGroq(
             temperature: 0.3,
             max_tokens: 4096,
           });
-          return retryResponse.choices[0]?.message?.content ?? null;
+          const output = retryResponse.choices[0]?.message?.content ?? null;
+          if (output) {
+            trackTokens(estimateTokens(systemPrompt, userPrompt, output));
+          }
+          return output;
         } catch (retryErr: any) {
           console.error(`[Groq/${model}] Retry also failed. Marking rate-limited for this run.`);
           _rateLimited = true;
           throw retryErr;
         }
       } else {
-        // Too long to wait — skip rest of run
         console.error(`[Groq/${model}] Wait too long (${waitSec}s). Marking rate-limited for this run.`);
         _rateLimited = true;
         throw err;
@@ -78,21 +89,17 @@ export async function callGroq(
 
 export function parseJSON<T = any>(raw: string): T | null {
   try {
-    // Strip markdown code fences
     let cleaned = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "");
 
-    // Find the first { and last }
     const firstBrace = cleaned.indexOf("{");
     const lastBrace = cleaned.lastIndexOf("}");
     if (firstBrace === -1 || lastBrace === -1) return null;
 
     cleaned = cleaned.slice(firstBrace, lastBrace + 1);
 
-    // Try direct parse
     try {
       return JSON.parse(cleaned);
     } catch {
-      // Fix trailing commas
       cleaned = cleaned.replace(/,\s*([}\]])/g, "$1");
       return JSON.parse(cleaned);
     }

@@ -1,10 +1,11 @@
 import { MODEL_CONFIG, RATE_LIMITS } from "../config";
 import { callGroq, isRateLimited } from "./groq";
 import { callGemini } from "./gemini";
+import { hasBudget, getBudgetStatus } from "../utils/tokenBudget";
 
 type Stage = keyof typeof MODEL_CONFIG;
 
-interface ModelResult {
+export interface ModelResult {
   response: string;
   model: string;
 }
@@ -16,7 +17,7 @@ let lastGeminiCall = 0;
 let _llmCallCount = 0;
 let _classifyCallCount = 0;
 let _generateCallCount = 0;
-let _lastResetDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+let _lastResetDate = new Date().toISOString().slice(0, 10);
 
 function checkAndResetDaily(): void {
   const today = new Date().toISOString().slice(0, 10);
@@ -74,9 +75,13 @@ export async function callModel(
 ): Promise<ModelResult | null> {
   checkAndResetDaily();
 
-  // Check rate-limit flag
   if (isRateLimited()) {
     console.warn(`[${stage}] Rate limited — will resume next run`);
+    return null;
+  }
+
+  if (!hasBudget()) {
+    console.warn(`[${stage}] Daily token budget exhausted (${getBudgetStatus()}). Will resume tomorrow.`);
     return null;
   }
 
@@ -123,5 +128,31 @@ export async function callModel(
   }
 
   console.error(`[${stage}] Both models failed`);
+  return null;
+}
+
+// Direct model call — bypasses stage config, uses specified model
+export async function callModelDirect(
+  model: string,
+  provider: "groq" | "gemini",
+  systemPrompt: string,
+  userPrompt: string
+): Promise<ModelResult | null> {
+  checkAndResetDaily();
+
+  if (isRateLimited()) return null;
+  if (!hasBudget()) return null;
+
+  try {
+    const response = await callProvider(provider, model, systemPrompt, userPrompt);
+    if (response) {
+      _llmCallCount++;
+      _generateCallCount++;
+      return { response, model };
+    }
+  } catch (err: any) {
+    console.warn(`[direct/${model}] Failed: ${err.message}`);
+  }
+
   return null;
 }

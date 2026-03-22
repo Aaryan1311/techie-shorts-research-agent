@@ -2,6 +2,7 @@ import prisma from "../db";
 import { callModel } from "../models/model-router";
 import { parseJSON } from "../models/groq";
 import { MAX_ARTICLES_PER_RUN, SOURCE_TRUST } from "../config";
+import { hasBudget, getBudgetStatus } from "../utils/tokenBudget";
 
 const VERIFY_SYSTEM_PROMPT = `You are a fact-checking editor. Review this article and score it on these dimensions.
 
@@ -33,6 +34,11 @@ interface VerifyResult {
 export async function runVerifyStage(): Promise<{ passed: number; failed: number }> {
   console.log("[Stage 5] Verifying articles...");
 
+  if (!hasBudget()) {
+    console.warn(`[Stage 5] Daily token budget exhausted (${getBudgetStatus()}). Will resume tomorrow.`);
+    return { passed: 0, failed: 0 };
+  }
+
   const articles = await prisma.pipelineArticle.findMany({
     where: { stage: "DEDUPED" },
     orderBy: { createdAt: "asc" },
@@ -51,20 +57,34 @@ export async function runVerifyStage(): Promise<{ passed: number; failed: number
     try {
       const sourceTrust = SOURCE_TRUST[article.source] ?? 5;
 
-      // Build content preview
+      // Auto-pass trusted sources (trust >= 8) without LLM call
+      if (sourceTrust >= 8) {
+        await prisma.pipelineArticle.update({
+          where: { id: article.id },
+          data: {
+            stage: "VERIFIED",
+            verificationScore: sourceTrust,
+            verificationNotes: "Auto-passed: trusted source",
+            verifiedAt: new Date(),
+          },
+        });
+        passed++;
+        console.log(`[verify] AUTO-PASS: ${article.rawTitle} (trusted source: ${article.source}, score=${sourceTrust})`);
+        continue;
+      }
+
+      // LLM verification for lower-trust sources
       const contentPreview = article.fullArticleText
         ? article.fullArticleText.split(/\s+/).slice(0, 500).join(" ")
         : article.rawDescription ?? "N/A";
 
       const userPrompt = `Title: ${article.rawTitle}\nSource: ${article.source}\nContent preview: ${contentPreview}`;
 
-      // 3 second delay between LLM calls
       await new Promise((r) => setTimeout(r, 3000));
 
       const result = await callModel("classify", VERIFY_SYSTEM_PROMPT, userPrompt);
 
       if (!result) {
-        // LLM failed — default to PASS based on source trust alone
         const trustScore = sourceTrust;
         console.warn(`[verify] LLM failed for ${article.rawTitle}, using source trust (${trustScore})`);
         await prisma.pipelineArticle.update({
@@ -83,7 +103,6 @@ export async function runVerifyStage(): Promise<{ passed: number; failed: number
       const parsed = parseJSON<VerifyResult>(result.response);
 
       if (!parsed) {
-        // Parse failed — default to PASS based on source trust
         await prisma.pipelineArticle.update({
           where: { id: article.id },
           data: {
@@ -98,7 +117,6 @@ export async function runVerifyStage(): Promise<{ passed: number; failed: number
         continue;
       }
 
-      // Compute final score: sourceTrust*0.3 + headlineAccuracy*0.3 + specificity*0.2 + sensationalism*0.2
       const verificationScore = Math.round(
         sourceTrust * 0.3 +
         (parsed.headlineAccuracy ?? 5) * 0.3 +
@@ -135,7 +153,6 @@ export async function runVerifyStage(): Promise<{ passed: number; failed: number
       }
     } catch (err: any) {
       console.error(`[verify] Error for ${article.rawTitle}: ${err.message}`);
-      // Don't block — auto-pass with source trust score
       const sourceTrust = SOURCE_TRUST[article.source] ?? 5;
       try {
         await prisma.pipelineArticle.update({
