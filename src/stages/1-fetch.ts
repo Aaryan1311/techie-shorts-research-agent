@@ -66,61 +66,92 @@ async function fetchRSSFeeds(): Promise<FeedItem[]> {
   return items;
 }
 
-async function fetchRedditFeeds(): Promise<FeedItem[]> {
+const REDDIT_UA = "TechieShorts/1.0 (news aggregator; +https://techin-shorts.vercel.app)";
+
+async function fetchRedditJSON(source: typeof REDDIT_SOURCES[number]): Promise<FeedItem[]> {
   const items: FeedItem[] = [];
 
-  for (const source of REDDIT_SOURCES) {
-    try {
-      const response = await fetch(
-        `https://www.reddit.com/r/${source.subreddit}/hot.json?limit=25`,
-        {
-          headers: {
-            "User-Agent": "TechieShorts/1.0 (research-agent)",
-          },
-        }
-      );
+  const response = await fetch(
+    `https://www.reddit.com/r/${source.subreddit}/hot.json?limit=25`,
+    { headers: { "User-Agent": REDDIT_UA } }
+  );
 
-      if (!response.ok) {
-        console.warn(`[fetch] Reddit r/${source.subreddit}: HTTP ${response.status}`);
-        continue;
-      }
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
 
-      const data: any = await response.json();
-      const posts = data?.data?.children ?? [];
+  const data: any = await response.json();
+  const posts = data?.data?.children ?? [];
 
-      for (const post of posts) {
-        const d = post.data;
+  for (const post of posts) {
+    const d = post.data;
 
-        // Skip self-posts, NSFW, and low-upvote posts
-        if (d.is_self) continue;
-        if (d.over_18) continue;
-        if (d.ups < source.minUpvotes) continue;
-        if (!d.url) continue;
+    if (d.is_self) continue;
+    if (d.over_18) continue;
+    if (d.ups < source.minUpvotes) continue;
+    if (!d.url) continue;
+    if (d.url.includes("reddit.com") || d.url.includes("redd.it")) continue;
 
-        // Skip reddit-internal links
-        if (d.url.includes("reddit.com") || d.url.includes("redd.it")) continue;
-
-        items.push({
-          title: he.decode(d.title ?? ""),
-          description: d.selftext
-            ? he.decode(d.selftext.slice(0, 500))
-            : undefined,
-          url: d.url,
-          imageUrl: d.thumbnail && d.thumbnail !== "default" && d.thumbnail !== "self"
-            ? d.thumbnail
-            : null,
-          source: "reddit",
-        });
-      }
-      console.log(
-        `[fetch] reddit/r/${source.subreddit}: ${posts.length} posts, ${items.length} qualifying`
-      );
-    } catch (err: any) {
-      console.warn(`[fetch] Failed to fetch reddit r/${source.subreddit}: ${err.message}`);
-    }
+    items.push({
+      title: he.decode(d.title ?? ""),
+      description: d.selftext ? he.decode(d.selftext.slice(0, 500)) : undefined,
+      url: d.url,
+      imageUrl: d.thumbnail && d.thumbnail !== "default" && d.thumbnail !== "self" ? d.thumbnail : null,
+      source: "reddit",
+    });
   }
 
   return items;
+}
+
+async function fetchRedditRSS(source: typeof REDDIT_SOURCES[number]): Promise<FeedItem[]> {
+  const items: FeedItem[] = [];
+
+  const feed = await parser.parseURL(
+    `https://www.reddit.com/r/${source.subreddit}/hot/.rss?limit=25`
+  );
+
+  for (const entry of feed.items) {
+    if (!entry.link) continue;
+    // RSS doesn't have upvote counts — include all and let classify filter
+    // Skip reddit-internal links
+    if (entry.link.includes("reddit.com") || entry.link.includes("redd.it")) continue;
+
+    items.push({
+      title: he.decode(entry.title ?? ""),
+      description: entry.contentSnippet ? he.decode(entry.contentSnippet.slice(0, 500)) : undefined,
+      url: entry.link,
+      imageUrl: null,
+      source: "reddit",
+    });
+  }
+
+  return items;
+}
+
+async function fetchRedditFeeds(): Promise<FeedItem[]> {
+  const allItems: FeedItem[] = [];
+
+  for (const source of REDDIT_SOURCES) {
+    try {
+      // Try JSON first
+      const items = await fetchRedditJSON(source);
+      allItems.push(...items);
+      console.log(`[fetch] reddit/r/${source.subreddit} (JSON): ${items.length} qualifying`);
+    } catch (jsonErr: any) {
+      // JSON failed (likely 403) — try RSS fallback
+      console.warn(`[fetch] Reddit r/${source.subreddit} JSON failed (${jsonErr.message}), trying RSS...`);
+      try {
+        const items = await fetchRedditRSS(source);
+        allItems.push(...items);
+        console.log(`[fetch] reddit/r/${source.subreddit} (RSS): ${items.length} items`);
+      } catch (rssErr: any) {
+        console.warn(`[fetch] Reddit r/${source.subreddit} RSS also failed: ${rssErr.message}`);
+      }
+    }
+  }
+
+  return allItems;
 }
 
 export interface FetchResult {

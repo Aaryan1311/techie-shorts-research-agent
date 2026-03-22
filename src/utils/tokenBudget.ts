@@ -1,6 +1,6 @@
 let tokensUsedToday = 0;
 let lastResetDate = new Date().toDateString();
-const DAILY_TOKEN_BUDGET = 400_000; // Stay under 500K with buffer
+const DAILY_TOKEN_BUDGET = 1_200_000; // 3 keys × 400K each
 
 export function trackTokens(used: number): void {
   const today = new Date().toDateString();
