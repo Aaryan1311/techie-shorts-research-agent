@@ -16,6 +16,11 @@ export const RSS_SOURCES = [
   { name: "css-tricks", url: "https://css-tricks.com/feed/" },
   // Gadgets
   { name: "androidauthority", url: "https://www.androidauthority.com/feed/" },
+  // Indian Business & Finance
+  { name: "moneycontrol", url: "https://www.moneycontrol.com/rss/technology.xml" },
+  { name: "et-tech", url: "https://economictimes.indiatimes.com/tech/rss" },
+  { name: "livemint-tech", url: "https://www.livemint.com/rss/technology" },
+  { name: "mint-startups", url: "https://www.livemint.com/rss/companies/start-ups" },
 ];
 
 export const REDDIT_SOURCES = [
@@ -81,6 +86,12 @@ export const SOURCE_TRUST: Record<string, number> = {
   "smashingmagazine": 8,
   "css-tricks": 8,
   "androidauthority": 7,
+
+  // Indian business & finance
+  "moneycontrol": 8,
+  "et-tech": 8,
+  "livemint-tech": 8,
+  "mint-startups": 7,
 
   // Lower trust (3-5): user-submitted, less editorial oversight
   "reddit": 5,

@@ -8,7 +8,7 @@ import { runClassifyStage } from "./stages/2-classify";
 import { runReadSourceStage } from "./stages/3-read-source";
 import { runDeduplicateStage } from "./stages/4-deduplicate";
 import { runVerifyStage } from "./stages/5-verify";
-import { runGenerateStage } from "./stages/6-generate";
+import { runGenerateStage, regenerateIncomplete } from "./stages/6-generate";
 import { runQAReviewStage } from "./stages/7-qa-review";
 import { runPublishStage } from "./stages/8-publish";
 import { getLLMCounts } from "./models/model-router";
@@ -183,6 +183,17 @@ async function runPipeline(): Promise<void> {
     errors++;
   }
 
+  // Regenerate incomplete articles from previous runs
+  let regenerated = 0;
+  if (checkBudget("generate")) {
+    try {
+      regenerated = await regenerateIncomplete();
+    } catch (err: any) {
+      console.error("[Pipeline] Regenerate incomplete failed:", err.message);
+      errors++;
+    }
+  }
+
   // Count failed articles
   let failed = 0;
   try {
@@ -218,6 +229,7 @@ async function runPipeline(): Promise<void> {
   console.log(`   Generated: ${generated} articles`);
   console.log(`   QA Review: ${qaResult.published} passed, ${qaResult.revised} revised, ${qaResult.rejected} rejected`);
   console.log(`   Published: ${published} articles`);
+  if (regenerated > 0) console.log(`   Regenerated: ${regenerated} incomplete articles`);
   console.log(`   Failed: ${failed}`);
   console.log(`   Errors: ${errors}`);
   console.log(`   LLM calls today: ${counts.total}/${DAILY_LIMITS.maxTotalLLMCalls} (classify: ${counts.classify}, generate: ${counts.generate})`);

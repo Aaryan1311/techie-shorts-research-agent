@@ -238,3 +238,89 @@ export async function runGenerateStage(): Promise<number> {
   console.log(`[Stage 6] Generated content for ${generated}/${articles.length} articles`);
   return generated;
 }
+
+export async function regenerateIncomplete(): Promise<number> {
+  console.log("[Stage 6b] Checking for incomplete published articles...");
+
+  // Find news articles with empty detailContent published in last 48 hours
+  const incompleteNews = await prisma.$queryRaw<
+    { id: string; title: string; sourceUrl: string }[]
+  >`
+    SELECT id, title, "sourceUrl" FROM news
+    WHERE ("detailContent" IS NULL OR "detailContent" = '')
+    AND "publishedAt" > NOW() - INTERVAL '48 hours'
+    LIMIT 5
+  `;
+
+  if (incompleteNews.length === 0) {
+    console.log("[Stage 6b] No incomplete articles to regenerate");
+    return 0;
+  }
+
+  let regenerated = 0;
+
+  for (const newsItem of incompleteNews) {
+    try {
+      // Find matching pipeline article
+      const pipelineArticle = await prisma.pipelineArticle.findUnique({
+        where: { sourceUrl: newsItem.sourceUrl },
+      });
+
+      if (!pipelineArticle) {
+        console.warn(`[regenerate] No pipeline article found for: ${newsItem.title}`);
+        continue;
+      }
+
+      const articleType = pipelineArticle.articleType ?? "DEEP_TECH";
+      const typePrompt = TYPE_PROMPTS[articleType] ?? TYPE_PROMPTS.DEEP_TECH;
+      const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\n${typePrompt}`;
+
+      let userPrompt = `Source article title: ${pipelineArticle.rawTitle}\nSource: ${pipelineArticle.source}\nSource description: ${pipelineArticle.rawDescription ?? "N/A"}\nArticle Type: ${articleType}`;
+
+      if (pipelineArticle.fullArticleText && pipelineArticle.sourceReadSuccess) {
+        const truncatedText = pipelineArticle.fullArticleText.split(/\s+/).slice(0, 1500).join(" ");
+        userPrompt += `\n\nFull source article (use this as the primary source of facts):\n${truncatedText}\n\nIMPORTANT: Base your detailed article on the FACTS in the source article above. Do NOT make up facts, quotes, numbers, or details that aren't in the source.`;
+      }
+
+      const result = await callModel("generate", systemPrompt, userPrompt);
+      if (!result) continue;
+
+      const parsed = parseJSON<GenerateResult>(result.response);
+      if (!parsed || !parsed.detailContent) continue;
+
+      const futureImpact = parsed.whatsNext ? formatFutureImpact(parsed.whatsNext) : null;
+      const buildOnThis = parsed.whatsNext?.buildIdeas ? formatBuildIdeas(parsed.whatsNext.buildIdeas) : null;
+
+      // Update news table directly via raw SQL
+      const detailContent = ensureString(parsed.detailContent);
+      await prisma.$executeRaw`
+        UPDATE news
+        SET "detailContent" = ${detailContent},
+            "futureImpact" = ${futureImpact},
+            "buildOnThis" = ${buildOnThis},
+            "updatedAt" = NOW()
+        WHERE id = ${newsItem.id}
+      `;
+
+      // Also update pipeline article
+      await prisma.pipelineArticle.update({
+        where: { id: pipelineArticle.id },
+        data: {
+          generatedDetail: detailContent,
+          generatedWhatsNext: futureImpact,
+          generatedBuildOnThis: buildOnThis,
+          generatedAt: new Date(),
+          generatedByModel: result.model,
+        },
+      });
+
+      regenerated++;
+      console.log(`[regenerate] Filled in content for: ${newsItem.title}`);
+    } catch (err: any) {
+      console.error(`[regenerate] Error for ${newsItem.title}: ${err.message}`);
+    }
+  }
+
+  console.log(`[Stage 6b] Regenerated content for ${regenerated}/${incompleteNews.length} incomplete articles`);
+  return regenerated;
+}
