@@ -17,10 +17,11 @@ export const RSS_SOURCES = [
   // Gadgets
   { name: "androidauthority", url: "https://www.androidauthority.com/feed/" },
   // Indian Business & Finance
-  { name: "moneycontrol", url: "https://www.moneycontrol.com/rss/technology.xml" },
-  { name: "et-tech", url: "https://economictimes.indiatimes.com/tech/rss" },
+  { name: "et-tech", url: "https://economictimes.indiatimes.com/tech/technology/rssfeeds/78570561.cms" },
   { name: "livemint-tech", url: "https://www.livemint.com/rss/technology" },
-  { name: "mint-startups", url: "https://www.livemint.com/rss/companies/start-ups" },
+  // International tech publications
+  { name: "venturebeat", url: "https://venturebeat.com/feed/" },
+  { name: "wired", url: "https://www.wired.com/feed/rss" },
 ];
 
 export const REDDIT_SOURCES = [
@@ -88,10 +89,12 @@ export const SOURCE_TRUST: Record<string, number> = {
   "androidauthority": 7,
 
   // Indian business & finance
-  "moneycontrol": 8,
   "et-tech": 8,
   "livemint-tech": 8,
-  "mint-startups": 7,
+
+  // International tech publications
+  "venturebeat": 8,
+  "wired": 9,
 
   // Lower trust (3-5): user-submitted, less editorial oversight
   "reddit": 5,
